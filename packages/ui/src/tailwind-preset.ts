@@ -1,9 +1,13 @@
 import type { Config } from 'tailwindcss';
+import defaultTheme from 'tailwindcss/defaultTheme';
 import animate from 'tailwindcss-animate';
 
 /**
  * Shared Tailwind preset. Colors are driven by CSS variables defined in
- * `styles.css` so light/dark themes swap without recompiling.
+ * `styles.css` so light/dark themes swap without recompiling. Font families
+ * are driven by `--font-sans` / `--font-mono`, set by `next/font` in the web
+ * app's root layout (self-hosted, so the strict CSP's `font-src 'self'`
+ * needs no change) with the previous system-font stack kept as the fallback.
  */
 const preset: Omit<Config, 'content'> = {
   darkMode: ['class'],
@@ -14,6 +18,10 @@ const preset: Omit<Config, 'content'> = {
       screens: { '2xl': '1280px' },
     },
     extend: {
+      fontFamily: {
+        sans: ['var(--font-sans)', ...defaultTheme.fontFamily.sans],
+        mono: ['var(--font-mono)', ...defaultTheme.fontFamily.mono],
+      },
       colors: {
         border: 'hsl(var(--border))',
         input: 'hsl(var(--input))',

@@ -6,6 +6,68 @@ reversal gets a new ADR that supersedes the old one.
 
 ---
 
+## ADR-0047 — Typography brought in line with a visual reference (Hanken Grotesk / IBM Plex Mono) via self-hosted `next/font`, not a Google Fonts `<link>`
+
+**Context.** A visual reference mockup for the product's screens ("Growth
+Agent Screen Blueprint") used an indigo accent and a 0.6rem radius that, on
+inspection, already matched the shipped tokens in
+`packages/ui/src/styles.css` almost exactly (`--primary: hsl(244 76% 58%)` ≈
+the mockup's `#4b46e8`; `--radius: 0.6rem` verbatim) — those were pulled from
+the real design system when the mockup was built. Its typography (Hanken
+Grotesk for display text, IBM Plex Mono for data/labels) was not: the app
+loaded no custom font at all and rendered in the browser/Tailwind default
+sans stack. Asked whether to bring the app closer to the mockup, the request
+was scoped deliberately narrow — adopt the typography pairing, change no
+component logic or route structure, and don't chase the mockup's more
+elaborate layout/background treatment, since this codebase had just been
+through a dedicated accessibility pass (Phase 29) that hand-tuned contrast
+and ARIA behavior across the existing components.
+
+**Decision.** Load both faces via `next/font/google` in
+`apps/web/app/layout.tsx` (`Hanken_Grotesk` → `--font-sans`, `IBM_Plex_Mono`
+→ `--font-mono`, both `display: 'swap'`), and map those CSS variables into
+the shared Tailwind preset's `fontFamily.sans` / `fontFamily.mono`
+(`packages/ui/src/tailwind-preset.ts`), each falling back to Tailwind's
+previous default stack (`...defaultTheme.fontFamily.sans/mono`) so a build
+that can't fetch the fonts degrades to exactly the prior look rather than
+breaking. `font-mono` was already used at 34 existing call sites across
+`apps/web` for IDs, timestamps and metric labels — wiring the variable
+picks all of them up automatically, with zero component edits and zero
+change to any feature.
+
+**Alternatives considered.**
+- **A `<link rel="stylesheet" href="https://fonts.googleapis.com/...">` tag**
+  (what the mockup itself uses, being a standalone artifact with no CSP) —
+  rejected: the app's `next.config.mjs` CSP is `style-src 'self'
+'unsafe-inline'` and `font-src 'self' data:` (docs/SECURITY.md §6,
+  ADR-0029/M-1), so a Google Fonts `<link>` would either be silently blocked
+  or require loosening the CSP to trust an external host — a real regression
+  in the security posture for a purely cosmetic change. `next/font`
+  downloads the font files at build time and serves them from the app's own
+  origin, so `font-src 'self'` already covers it with no CSP edit.
+- **Adopting the mockup's full visual language** (dotted grid background,
+  denser stat/pane/pill component set, sticky blurred header) — deferred,
+  not rejected outright: it would mean redesigning existing, already-audited
+  components rather than layering a token, with a real risk of regressing
+  Phase 29's contrast/ARIA fixes without a re-audit. Left as a possible
+  future, explicitly-scoped follow-up rather than folded into this change.
+
+**Consequences.** Visual-only change: no route, Server Action, schema, or
+RBAC logic touched. Verified via `pnpm lint` (14/14) and
+`pnpm --filter @growth-agent/web typecheck`, plus a full
+`pnpm --filter @growth-agent/web build`. This sandbox's Node process
+cannot complete the outbound TLS handshake to `fonts.gstatic.com` (`curl`
+succeeds via the OS trust store; Node's own fetch fails with
+`UNABLE_TO_VERIFY_LEAF_SIGNATURE` — a local network/proxy-trust quirk of
+this environment, not a code defect), so `next/font`'s built-in
+metrics-matched fallback face renders here instead of the real Hanken
+Grotesk/IBM Plex Mono glyphs; the build itself still succeeds because
+`next/font` treats a failed font fetch as non-fatal. In a normal deploy
+environment with standard outbound TLS trust, the real fonts load exactly
+as any other `next/font` integration.
+
+---
+
 ## ADR-0046 — Final security review (Phase 31): risk-adjusted severity over raw CVE rating for dev-only findings; `--prod`-only dependency-audit scope re-confirmed deliberate, not widened; a real metering bug outranks every tooling-availability gap found; disaster recovery gets a documentation section, not a program
 
 **Context.** The brief asked for a comprehensive pre-production security
