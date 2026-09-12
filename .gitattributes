@@ -1,0 +1,6 @@
+# Normalize line endings: LF in the repo, checked out as-is.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.pdf binary
+pnpm-lock.yaml -diff linguist-generated

@@ -1,0 +1,156 @@
+# Growth Agent — production compose for a single-host / self-managed deploy.
+#
+#   node scripts/check-env.mjs --file .env.production --target all   # validate first
+#   docker compose -f docker-compose.production.yml build
+#   docker compose -f docker-compose.production.yml run --rm migrate # release step
+#   docker compose -f docker-compose.production.yml up -d
+#
+# The production requirements (managed Postgres, managed Redis, object storage,
+# secrets manager) are met by pointing DATABASE_URL / DIRECT_URL / REDIS_URL /
+# S3_* at managed services in `.env.production`. This file does NOT run its own
+# database or Redis — see the commented block at the bottom for a true
+# all-in-one box.
+#
+# Caddy terminates TLS (automatic Let's Encrypt), forces the canonical host,
+# and long-caches `/_next/static` (a CDN in front is still recommended — §16).
+
+x-app-env: &app-env
+  env_file: [.env.production]
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+      args: { NODE_VERSION: '20.11.0' }
+    image: growth-agent-web:${IMAGE_TAG:-latest}
+    <<: *app-env
+    environment:
+      PORT: '3000'
+      NODE_ENV: production
+    restart: unless-stopped
+    expose: ['3000']
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '--spider', 'http://127.0.0.1:3000/api/health']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits: { cpus: '1.5', memory: 1024M }
+    logging:
+      driver: json-file
+      options: { max-size: '10m', max-file: '5' }
+    networks: [edge, internal]
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+      args: { NODE_VERSION: '20.11.0', PLAYWRIGHT_VERSION: '1.49.1' }
+    image: growth-agent-worker:${IMAGE_TAG:-latest}
+    <<: *app-env
+    environment:
+      NODE_ENV: production
+      WORKER_HEALTH_PORT: '9090'
+    restart: unless-stopped
+    # /healthz + /metrics are internal-only — never mapped to a public port.
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '--spider', 'http://127.0.0.1:9090/healthz']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits: { cpus: '2.0', memory: 2048M } # Chromium is memory-hungry
+    logging:
+      driver: json-file
+      options: { max-size: '10m', max-file: '5' }
+    networks: [internal]
+
+  # One-shot: run migrations in a release step, never at app boot (§12).
+  #   docker compose -f docker-compose.production.yml run --rm migrate
+  migrate:
+    image: growth-agent-worker:${IMAGE_TAG:-latest}
+    <<: *app-env
+    entrypoint: ['pnpm', '--filter', '@growth-agent/db', 'migrate:deploy']
+    restart: 'no'
+    networks: [internal]
+    profiles: ['tools']
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [web]
+    ports: ['80:80', '443:443', '443:443/udp']
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?set APP_DOMAIN in .env.production}
+      TLS_EMAIL: ${TLS_EMAIL:?set TLS_EMAIL in .env.production}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    logging:
+      driver: json-file
+      options: { max-size: '10m', max-file: '5' }
+    networks: [edge]
+
+  # --- Monitoring (opt-in): `docker compose --profile monitoring up -d` -------
+  # Prometheus scrapes web `/api/metrics` (needs METRICS_TOKEN) + worker :9090.
+  # Alertmanager ships with a NULL receiver — wire Slack/PagerDuty in
+  # deploy/alertmanager.yml before relying on it (DEPLOYMENT.md §16).
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    restart: unless-stopped
+    profiles: ['monitoring']
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=15d'
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ./.secrets/metrics_token:/etc/prometheus/metrics_token:ro
+      - prometheus_data:/prometheus
+    networks: [internal]
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    restart: unless-stopped
+    profiles: ['monitoring']
+    command: ['--config.file=/etc/alertmanager/alertmanager.yml']
+    volumes:
+      - ./deploy/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    networks: [internal]
+
+networks:
+  edge:
+  internal:
+    internal: true
+
+volumes:
+  caddy_data:
+  caddy_config:
+  prometheus_data:
+  alertmanager_data:
+# --- true all-in-one box (NOT recommended for real production) --------------
+# Uncomment to also run Postgres + Redis on this host, and set
+# DATABASE_URL=postgresql://postgres:...@postgres:5432/growth_agent
+# REDIS_URL=redis://redis:6379 in .env.production.
+#
+#  postgres:
+#    image: postgres:16
+#    restart: unless-stopped
+#    environment: { POSTGRES_USER: postgres, POSTGRES_PASSWORD: ${PG_PASSWORD:?}, POSTGRES_DB: growth_agent }
+#    volumes: [pgdata:/var/lib/postgresql/data]
+#    healthcheck: { test: ['CMD-SHELL', 'pg_isready -U postgres'], interval: 10s, timeout: 5s, retries: 5 }
+#    networks: [internal]
+#  redis:
+#    image: redis:7-alpine
+#    restart: unless-stopped
+#    command: ['redis-server', '--appendonly', 'yes', '--maxmemory', '512mb', '--maxmemory-policy', 'noeviction']
+#    volumes: [redisdata:/data]
+#    networks: [internal]
+# volumes: { pgdata:, redisdata: }

@@ -1,0 +1,121 @@
+# Growth Agent — staging compose. A near-duplicate of
+# docker-compose.production.yml, kept as a SEPARATE file (not a shared base +
+# override) so `git diff docker-compose.production.yml docker-compose.staging.yml`
+# shows the entire, exact difference at a glance — deliberately not clever,
+# so nobody has to reason about merged override layers to know what staging
+# actually runs.
+#
+#   node scripts/check-env.mjs --file .env.staging --target all   # validate first
+#   docker compose -f docker-compose.staging.yml build
+#   docker compose -f docker-compose.staging.yml run --rm migrate # release step
+#   docker compose -f docker-compose.staging.yml up -d
+#
+# Full walkthrough: docs/STAGING.md.
+#
+# Differences from docker-compose.production.yml, exhaustively:
+#   1. env_file is .env.staging, not .env.production (kept as two separate
+#      files, deliberately — a staging host should never accidentally load
+#      real production secrets, and vice versa).
+#   2. Image tags default to `staging`, not `latest`, so a shared registry
+#      never confuses the two.
+#   3. Smaller resource limits (a staging box is typically much smaller than
+#      production) — raise these back if staging needs to soak-test at
+#      production scale.
+# NODE_ENV is still "production" (not "staging") in both containers — this
+# is intentional, not a typo. Node/Next/Prisma/most libraries only branch on
+# NODE_ENV === 'production' vs. not; there is no third NODE_ENV value this
+# stack understands. Which *environment* this is comes entirely from which
+# .env file and which secrets are loaded — never from NODE_ENV.
+
+x-app-env: &app-env
+  env_file: [.env.staging]
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+      args: { NODE_VERSION: '20.11.0' }
+    image: growth-agent-web:${IMAGE_TAG:-staging}
+    <<: *app-env
+    environment:
+      PORT: '3000'
+      NODE_ENV: production
+    restart: unless-stopped
+    expose: ['3000']
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '--spider', 'http://127.0.0.1:3000/api/health']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits: { cpus: '1.0', memory: 768M }
+    logging:
+      driver: json-file
+      options: { max-size: '10m', max-file: '3' }
+    networks: [edge, internal]
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+      args: { NODE_VERSION: '20.11.0', PLAYWRIGHT_VERSION: '1.49.1' }
+    image: growth-agent-worker:${IMAGE_TAG:-staging}
+    <<: *app-env
+    environment:
+      NODE_ENV: production
+      WORKER_HEALTH_PORT: '9090'
+    restart: unless-stopped
+    # /healthz + /metrics are internal-only — never mapped to a public port.
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '--spider', 'http://127.0.0.1:9090/healthz']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits: { cpus: '1.0', memory: 1536M } # Chromium is memory-hungry even on staging
+    logging:
+      driver: json-file
+      options: { max-size: '10m', max-file: '3' }
+    networks: [internal]
+
+  # One-shot: run migrations in a release step, never at app boot (§12 of
+  # docs/DEPLOYMENT.md — same rule applies to staging).
+  #   docker compose -f docker-compose.staging.yml run --rm migrate
+  migrate:
+    image: growth-agent-worker:${IMAGE_TAG:-staging}
+    <<: *app-env
+    entrypoint: ['pnpm', '--filter', '@growth-agent/db', 'migrate:deploy']
+    restart: 'no'
+    networks: [internal]
+    profiles: ['tools']
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [web]
+    ports: ['80:80', '443:443', '443:443/udp']
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?set APP_DOMAIN in .env.staging, e.g. staging.example.com}
+      TLS_EMAIL: ${TLS_EMAIL:?set TLS_EMAIL in .env.staging}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    logging:
+      driver: json-file
+      options: { max-size: '10m', max-file: '3' }
+    networks: [edge]
+
+networks:
+  edge:
+  internal:
+    internal: true
+
+volumes:
+  caddy_data:
+  caddy_config:

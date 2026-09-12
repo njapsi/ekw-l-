@@ -1,0 +1,1980 @@
+// Growth Agent — database schema.
+// See /docs/DATABASE.md for the full data model design. Models are grouped by
+// the phase that introduced them (identity/tenancy/RBAC/audit → integrations →
+// YouTube/TikTok → SEO → AI agent → content → monetization → billing/usage →
+// reporting → automation → admin/observability → notifications & lifecycle).
+// Migrations are checked in and additive (expand/contract); see docs/DATABASE.md.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// --- Identity -------------------------------------------------------------
+
+model User {
+  id             String    @id @default(cuid())
+  email          String    @unique
+  emailVerified  DateTime?
+  name           String?
+  image          String?
+  // Bumped to invalidate all of a user's issued JWT sessions (revocation).
+  sessionVersion Int       @default(0)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
+
+  profile          UserProfile?
+  preferences      UserPreference[]
+  memberships      Membership[]
+  accounts         Account[]
+  sessions         Session[]
+  platformStaff    PlatformStaff?
+  auditLogs        AuditLog[]
+  sentInvites      Invitation[]      @relation("InvitedBy")
+  oauthConnections OAuthConnection[] @relation("ConnectionCreatedBy")
+  notifications    Notification[]
+
+  // Set when the user requested account deletion; a grace-period purge job
+  // anonymises the row after `deletionScheduledAt`. `requireUser` already
+  // refuses a user whose `deletedAt` is set.
+  deletionScheduledAt DateTime?
+
+  @@map("users")
+}
+
+model UserProfile {
+  id             String   @id @default(cuid())
+  userId         String   @unique
+  timezone       String   @default("UTC")
+  locale         String   @default("en")
+  marketingOptIn Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_profiles")
+}
+
+model UserPreference {
+  id     String @id @default(cuid())
+  userId String
+  key    String
+  value  Json
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, key])
+  @@map("user_preferences")
+}
+
+// --- Auth.js adapter tables (users/accounts/verification only; sessions are
+//     JWT — see docs/DECISIONS.md ADR-0011 — but the model is kept for the
+//     adapter contract and possible future opt-in). ------------------------
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// --- Tenancy & RBAC ----------------------------------------------------------
+
+enum OrgType {
+  PERSONAL
+  TEAM
+  AGENCY
+  BUSINESS
+}
+
+enum Role {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+enum MembershipStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+model Organization {
+  id        String    @id @default(cuid())
+  name      String
+  slug      String    @unique
+  type      OrgType   @default(PERSONAL)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  memberships               Membership[]
+  invitations               Invitation[]
+  auditLogs                 AuditLog[]
+  oauthConnections          OAuthConnection[]
+  youTubeChannels           YouTubeChannel[]
+  youTubeVideos             YouTubeVideo[]
+  youTubeMetrics            YouTubeMetric[]
+  youTubeSyncRuns           YouTubeSyncRun[]
+  tikTokAccounts            TikTokAccount[]
+  tikTokVideos              TikTokVideo[]
+  tikTokMetrics             TikTokMetric[]
+  tikTokSyncRuns            TikTokSyncRun[]
+  tikTokPublishes           TikTokPublish[]
+  agentRuns                 AgentRun[]
+  recommendations           Recommendation[]
+  contentIdeas              ContentIdea[]
+  websites                  Website[]
+  crawls                    Crawl[]
+  crawlPages                CrawlPage[]
+  crawlLinks                CrawlLink[]
+  crawlIssues               CrawlIssue[]
+  aiConversations           AIConversation[]
+  aiMessages                AIMessage[]
+  orgMemories               OrgMemory[]
+  tasks                     Task[]
+  repurposeProjects         RepurposeProject[]
+  contentAssets             ContentAsset[]
+  contentAssetVersions      ContentAssetVersion[]
+  businessProfile           BusinessProfile?
+  monetizationOpportunities MonetizationOpportunity[]
+  revenueEntries            RevenueEntry[]
+  subscription              Subscription?
+  entitlements              Entitlement[]
+  usageRecords              UsageRecord[]
+  usageCounters             UsageCounter[]
+  invoices                  Invoice[]
+  reports                   Report[]
+  automationRules           AutomationRule[]
+  automationRuns            AutomationRun[]
+  notifications             Notification[]
+  searchConsoleSites        SearchConsoleSite[]
+  searchConsoleSnapshots    SearchConsoleSnapshot[]
+
+  // Set when an OWNER requested deletion; the org is hidden immediately and a
+  // grace-period purge job hard-deletes it (cascading every tenant row) after
+  // `deletionScheduledAt`.
+  deletionScheduledAt DateTime?
+  deletionRequestedById String?
+
+  @@map("organizations")
+}
+
+model Membership {
+  id             String           @id @default(cuid())
+  userId         String
+  organizationId String
+  role           Role             @default(MEMBER)
+  status         MembershipStatus @default(ACTIVE)
+  invitedById    String?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, organizationId])
+  @@index([organizationId, role])
+  @@map("memberships")
+}
+
+model Invitation {
+  id             String    @id @default(cuid())
+  organizationId String
+  email          String
+  role           Role      @default(MEMBER)
+  tokenHash      String    @unique
+  invitedById    String
+  expiresAt      DateTime
+  acceptedAt     DateTime?
+  revokedAt      DateTime?
+  createdAt      DateTime  @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  invitedBy    User         @relation("InvitedBy", fields: [invitedById], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([email])
+  @@map("invitations")
+}
+
+// --- Platform staff (operates /admin; separate from org roles) --------------
+
+enum StaffLevel {
+  SUPPORT
+  OPERATOR
+  SUPERADMIN
+}
+
+model PlatformStaff {
+  id        String     @id @default(cuid())
+  userId    String     @unique
+  level     StaffLevel @default(SUPPORT)
+  createdAt DateTime   @default(now())
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("platform_staff")
+}
+
+// --- Audit log (append-only) --------------------------------------------
+
+enum ActorType {
+  USER
+  PLATFORM_STAFF
+  SYSTEM
+  AGENT
+}
+
+model AuditLog {
+  id             String    @id @default(cuid())
+  organizationId String?
+  actorId        String?
+  actorType      ActorType @default(USER)
+  action         String
+  targetType     String?
+  targetId       String?
+  ip             String?
+  userAgent      String?
+  metadata       Json?
+  createdAt      DateTime  @default(now())
+
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  actor        User?         @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@index([action, createdAt])
+  @@map("audit_logs")
+}
+
+// ===========================================================================
+// Phase 3 — Integrations + YouTube
+// ===========================================================================
+
+enum IntegrationProvider {
+  YOUTUBE
+  GOOGLE_SEARCH_CONSOLE
+  TIKTOK
+}
+
+enum ConnectionStatus {
+  ACTIVE
+  EXPIRED
+  REVOKED
+  ERROR
+}
+
+/// An OAuth-connected external account. Tokens are encrypted at rest with
+/// AES-256-GCM (docs/SECURITY.md section 5) and are NEVER selected into an API
+/// response or a log line.
+model OAuthConnection {
+  id                 String              @id @default(cuid())
+  organizationId     String
+  provider           IntegrationProvider
+  externalAccountId  String
+  displayName        String?
+  scopes             String[]
+  accessTokenCipher  String              @db.Text
+  refreshTokenCipher String?             @db.Text
+  tokenIv            String
+  tokenAuthTag       String
+  refreshIv          String?
+  refreshAuthTag     String?
+  keyId              String
+  expiresAt          DateTime?
+  status             ConnectionStatus    @default(ACTIVE)
+  lastRefreshedAt    DateTime?
+  lastError          String?
+  createdById        String?
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+
+  organization       Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdBy          User?               @relation("ConnectionCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  health             IntegrationHealth?
+  youTubeChannels    YouTubeChannel[]
+  tikTokAccounts     TikTokAccount[]
+  searchConsoleSites SearchConsoleSite[]
+
+  @@unique([organizationId, provider, externalAccountId])
+  @@index([organizationId, provider])
+  @@map("oauth_connections")
+}
+
+model IntegrationHealth {
+  id                  String    @id @default(cuid())
+  oauthConnectionId   String    @unique
+  lastCheckAt         DateTime  @default(now())
+  ok                  Boolean   @default(true)
+  detail              String?
+  quotaUnitsUsedToday Int       @default(0)
+  quotaResetAt        DateTime?
+  updatedAt           DateTime  @updatedAt
+
+  connection OAuthConnection @relation(fields: [oauthConnectionId], references: [id], onDelete: Cascade)
+
+  @@map("integration_health")
+}
+
+model YouTubeChannel {
+  id                    String    @id @default(cuid())
+  organizationId        String
+  oauthConnectionId     String
+  channelId             String
+  title                 String
+  handle                String?
+  description           String?   @db.Text
+  thumbnailUrl          String?
+  country               String?
+  publishedAt           DateTime?
+  uploadsPlaylistId     String?
+  subscriberCount       BigInt?
+  hiddenSubscriberCount Boolean   @default(false)
+  videoCount            Int?
+  viewCount             BigInt?
+  firstSyncedAt         DateTime  @default(now())
+  lastSyncedAt          DateTime  @default(now())
+  lastVideoSyncAt       DateTime?
+  lastAnalyticsSyncAt   DateTime?
+  lastVideoPublishedAt  DateTime?
+
+  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  connection   OAuthConnection  @relation(fields: [oauthConnectionId], references: [id], onDelete: Cascade)
+  videos       YouTubeVideo[]
+  syncRuns     YouTubeSyncRun[]
+
+  @@unique([organizationId, channelId])
+  @@index([oauthConnectionId])
+  @@map("youtube_channels")
+}
+
+model YouTubeVideo {
+  id                   String    @id @default(cuid())
+  organizationId       String
+  youTubeChannelId     String
+  videoId              String
+  title                String
+  description          String?   @db.Text
+  publishedAt          DateTime
+  durationSeconds      Int?
+  tags                 String[]
+  categoryId           String?
+  thumbnailUrl         String?
+  madeForKids          Boolean?
+  privacyStatus        String?
+  liveBroadcastContent String?
+  defaultLanguage      String?
+  viewCount            BigInt?
+  likeCount            BigInt?
+  commentCount         BigInt?
+  favoriteCount        BigInt?
+  statsUpdatedAt       DateTime?
+  lastSyncedAt         DateTime  @default(now())
+
+  organization Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  channel      YouTubeChannel @relation(fields: [youTubeChannelId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, videoId])
+  @@index([youTubeChannelId, publishedAt])
+  @@map("youtube_videos")
+}
+
+enum YouTubeSubjectType {
+  CHANNEL
+  VIDEO
+}
+
+/// Append-only daily time-series from the YouTube Analytics API. One row per
+/// (subject, day). Monetary metrics are present only when the connection was
+/// granted the monetary scope AND the API returned a value -- otherwise null,
+/// never imputed (docs/YOUTUBE-INTEGRATION.md).
+model YouTubeMetric {
+  id                      String             @id @default(cuid())
+  organizationId          String
+  subjectType             YouTubeSubjectType
+  subjectId               String
+  date                    DateTime           @db.Date
+  views                   BigInt             @default(0)
+  estimatedMinutesWatched BigInt             @default(0)
+  averageViewDurationSec  Int?
+  likes                   BigInt             @default(0)
+  comments                BigInt             @default(0)
+  shares                  BigInt             @default(0)
+  subscribersGained       BigInt             @default(0)
+  subscribersLost         BigInt             @default(0)
+  impressions             BigInt?
+  impressionsCtr          Float?
+  estimatedRevenue        Decimal?           @db.Decimal(14, 4)
+  source                  String             @default("youtube.analytics.v2")
+  createdAt               DateTime           @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([subjectType, subjectId, date])
+  @@index([organizationId, date])
+  @@map("youtube_metrics")
+}
+
+enum YouTubeSyncKind {
+  CHANNEL
+  VIDEOS
+  ANALYTICS
+}
+
+enum SyncStatus {
+  RUNNING
+  COMPLETED
+  FAILED
+  SKIPPED
+}
+
+model YouTubeSyncRun {
+  id               String          @id @default(cuid())
+  organizationId   String
+  youTubeChannelId String
+  kind             YouTubeSyncKind
+  status           SyncStatus      @default(RUNNING)
+  itemsProcessed   Int             @default(0)
+  quotaUnitsSpent  Int             @default(0)
+  error            String?
+  cursor           Json?
+  startedAt        DateTime        @default(now())
+  finishedAt       DateTime?
+
+  organization Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  channel      YouTubeChannel @relation(fields: [youTubeChannelId], references: [id], onDelete: Cascade)
+
+  @@index([youTubeChannelId, kind, startedAt])
+  @@map("youtube_sync_runs")
+}
+
+// --- Agent runs, recommendations, content ideas (shared; YouTube uses them) --
+
+enum AgentRunStatus {
+  QUEUED
+  RUNNING
+  NEEDS_APPROVAL
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+model AgentRun {
+  id               String         @id @default(cuid())
+  organizationId   String
+  agent            String
+  status           AgentRunStatus @default(QUEUED)
+  trigger          String?
+  input            Json
+  output           Json?
+  error            String?
+  tokensPrompt     Int            @default(0)
+  tokensCompletion Int            @default(0)
+  costUsd          Decimal        @default(0) @db.Decimal(14, 6)
+  model            String?
+  provider         String?
+  startedAt        DateTime?
+  finishedAt       DateTime?
+  createdAt        DateTime       @default(now())
+
+  organization    Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  recommendations Recommendation[]
+  contentIdeas    ContentIdea[]
+  aiMessages      AIMessage[]
+
+  @@index([organizationId, agent, createdAt])
+  @@map("agent_runs")
+}
+
+enum RecommendationDomain {
+  SEO
+  YOUTUBE
+  TIKTOK
+  CONTENT
+  GROWTH
+}
+
+enum RecommendationStatus {
+  PROPOSED
+  APPROVED
+  REJECTED
+  APPLIED
+  DISMISSED
+}
+
+model Recommendation {
+  id                         String               @id @default(cuid())
+  organizationId             String
+  domain                     RecommendationDomain
+  sourceAgentRunId           String?
+  subjectRef                 String?
+  title                      String
+  explanation                String               @db.Text
+  reasoning                  String               @db.Text
+  priority                   String
+  effort                     String
+  confidence                 Float
+  expectedImpact             String               @db.Text
+  recommendedActions         String[]
+  implementationInstructions String               @db.Text
+  evidence                   Json
+  status                     RecommendationStatus @default(PROPOSED)
+  requiresApproval           Boolean              @default(true)
+  approvedById               String?
+  approvedAt                 DateTime?
+  dismissedReason            String?
+  // --- Phase 6: AI SEO Agent recommendation engine ---
+  /// 0-100 composite of severity, reach, business importance, impact,
+  /// difficulty and confidence. Higher = do sooner. Null for pre-Phase-6 rows.
+  priorityScore              Float?
+  /// Action-plan bucket: "quick_win" | "high_impact" | "technical_project" | "long_term".
+  actionPlan                 String?
+  affectedUrlCount           Int?
+  /// Heuristic label: "high" | "medium" | "low".
+  businessImportance         String?
+  createdAt                  DateTime             @default(now())
+  updatedAt                  DateTime             @updatedAt
+
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  sourceAgentRun AgentRun?    @relation(fields: [sourceAgentRunId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, domain, status])
+  /// Serves the highest-volume reads, which filter by organizationId alone
+  /// and sort by priorityScore desc, createdAt desc (agent capabilities.ts,
+  /// reports facts.ts) — not covered by the composite index above.
+  @@index([organizationId, priorityScore, createdAt])
+  @@map("recommendations")
+}
+
+enum ContentIdeaStatus {
+  NEW
+  SAVED
+  IN_PROGRESS
+  PUBLISHED
+  DISCARDED
+}
+
+model ContentIdea {
+  id                  String            @id @default(cuid())
+  organizationId      String
+  platform            String
+  kind                String
+  title               String
+  rationale           String            @db.Text
+  supportingClaims    Json
+  keywords            String[]
+  relatedRefs         String[]
+  status              ContentIdeaStatus @default(NEW)
+  createdByAgentRunId String?
+  createdAt           DateTime          @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdByRun AgentRun?    @relation(fields: [createdByAgentRunId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, platform, status])
+  @@map("content_ideas")
+}
+
+// ===========================================================================
+// Phase 4 — TikTok
+// ===========================================================================
+
+model TikTokAccount {
+  id                  String    @id @default(cuid())
+  organizationId      String
+  oauthConnectionId   String
+  openId              String
+  username            String?
+  displayName         String?
+  avatarUrl           String?
+  bioDescription      String?   @db.Text
+  isVerified          Boolean?
+  // Present only if user.info.stats/profile scopes were granted AND the API
+  // returned a value. Nullable everywhere — never imputed.
+  followerCount       BigInt?
+  followingCount      BigInt?
+  likesCount          BigInt?
+  videoCountStat      Int?
+  profileDeepLink     String?
+  firstSyncedAt       DateTime  @default(now())
+  lastSyncedAt        DateTime  @default(now())
+  lastVideoSyncAt     DateTime?
+  lastVideoCreateTime DateTime?
+
+  organization Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  connection   OAuthConnection @relation(fields: [oauthConnectionId], references: [id], onDelete: Cascade)
+  videos       TikTokVideo[]
+  syncRuns     TikTokSyncRun[]
+  publishes    TikTokPublish[]
+
+  @@unique([organizationId, openId])
+  @@index([oauthConnectionId])
+  @@map("tiktok_accounts")
+}
+
+model TikTokVideo {
+  id              String    @id @default(cuid())
+  organizationId  String
+  tikTokAccountId String
+  videoId         String
+  caption         String?   @db.Text
+  createTime      DateTime
+  durationSec     Int?
+  coverImageUrl   String?
+  shareUrl        String?
+  embedLink       String?
+  hashtags        String[]
+  // Per-video stats from video/list where the fields are permitted. Nullable.
+  viewCount       BigInt?
+  likeCount       BigInt?
+  commentCount    BigInt?
+  shareCount      BigInt?
+  statsUpdatedAt  DateTime?
+  lastSyncedAt    DateTime  @default(now())
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  account      TikTokAccount @relation(fields: [tikTokAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, videoId])
+  @@index([tikTokAccountId, createTime])
+  @@map("tiktok_videos")
+}
+
+/// Optional append-only snapshot of account-level stats over time. TikTok's
+/// public API does not expose day-by-day analytics, so this is a manual
+/// snapshot (one row per sync), not a true time-series.
+model TikTokMetric {
+  id              String   @id @default(cuid())
+  organizationId  String
+  tikTokAccountId String
+  capturedAt      DateTime @default(now())
+  followerCount   BigInt?
+  likesCount      BigInt?
+  videoCount      Int?
+  source          String   @default("tiktok.display.v2:user.info")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, capturedAt])
+  @@map("tiktok_metrics")
+}
+
+enum TikTokSyncKind {
+  ACCOUNT
+  VIDEOS
+}
+
+model TikTokSyncRun {
+  id              String         @id @default(cuid())
+  organizationId  String
+  tikTokAccountId String
+  kind            TikTokSyncKind
+  status          SyncStatus     @default(RUNNING)
+  itemsProcessed  Int            @default(0)
+  error           String?
+  cursor          Json?
+  startedAt       DateTime       @default(now())
+  finishedAt      DateTime?
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  account      TikTokAccount @relation(fields: [tikTokAccountId], references: [id], onDelete: Cascade)
+
+  @@index([tikTokAccountId, kind, startedAt])
+  @@map("tiktok_sync_runs")
+}
+
+enum TikTokPublishStatus {
+  DRAFT
+  AWAITING_APPROVAL
+  SUBMITTED
+  PROCESSING
+  PUBLISHED
+  FAILED
+  CANCELLED
+}
+
+enum TikTokPrivacy {
+  PUBLIC_TO_EVERYONE
+  MUTUAL_FOLLOW_FRIENDS
+  FOLLOWER_OF_CREATOR
+  SELF_ONLY
+}
+
+/// One authorized publish attempt via the Content Posting API. Never created
+/// or advanced without explicit user approval (master instruction, section K).
+model TikTokPublish {
+  id              String              @id @default(cuid())
+  organizationId  String
+  tikTokAccountId String
+  status          TikTokPublishStatus @default(DRAFT)
+  privacy         TikTokPrivacy       @default(SELF_ONLY)
+  caption         String              @db.Text
+  hashtags        String[]
+  // Source of the media. Phase 4 supports PULL_FROM_URL (a public direct video URL).
+  sourceType      String              @default("PULL_FROM_URL")
+  sourceUrl       String?
+  disableComment  Boolean             @default(false)
+  disableDuet     Boolean             @default(false)
+  disableStitch   Boolean             @default(false)
+  // Dedupe guard: sha256 of (accountId|sourceUrl|caption|hashtags).
+  contentHash     String
+  publishId       String? // TikTok's publish_id
+  error           String?
+  createdById     String
+  approvedById    String?
+  approvedAt      DateTime?
+  submittedAt     DateTime?
+  completedAt     DateTime?
+  lastStatusCheck DateTime?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  account      TikTokAccount @relation(fields: [tikTokAccountId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, status])
+  @@index([tikTokAccountId, contentHash])
+  @@map("tiktok_publishes")
+}
+
+// ===========================================================================
+// Phase 5 — Technical SEO crawler + auditor
+// ===========================================================================
+
+enum WebsiteVerificationMethod {
+  DNS_TXT
+  HTML_FILE
+  SEARCH_CONSOLE
+}
+
+/// A website an organization has registered for crawling. A full crawl only
+/// runs once `verified = true` (DNS TXT record, uploaded HTML token file, or a
+/// linked Search Console property). Unverified sites get a shallow public
+/// sample only (docs/SEO-ENGINE.md §2).
+model Website {
+  id                 String                     @id @default(cuid())
+  organizationId     String
+  /// Canonical origin, e.g. "https://example.com".
+  url                String
+  /// Lowercased registrable hostname, e.g. "example.com".
+  hostname           String
+  verified           Boolean                    @default(false)
+  verificationMethod WebsiteVerificationMethod?
+  /// Random token the org must publish (DNS TXT value / file contents).
+  verificationToken  String
+  verifiedAt         DateTime?
+  /// Cached robots.txt body + fetch time (re-fetched when stale).
+  robotsTxtCache     String?                    @db.Text
+  robotsFetchedAt    DateTime?
+  createdAt          DateTime                   @default(now())
+  updatedAt          DateTime                   @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  crawls       Crawl[]
+  issues       CrawlIssue[]
+
+  @@unique([organizationId, hostname])
+  @@index([organizationId])
+  @@map("websites")
+}
+
+enum CrawlRenderMode {
+  STATIC
+  AUTO
+  HEADLESS
+}
+
+enum CrawlStatus {
+  QUEUED
+  RUNNING
+  PAUSED
+  COMPLETED
+  FAILED
+  CANCELLED
+  /// The target refused us (WAF / bot protection / robots full-disallow). We
+  /// record this and never attempt to evade it.
+  BLOCKED
+}
+
+/// One crawl run against a `Website`. `config` holds the resolved plan
+/// (maxPages, maxDepth, maxDurationSec, concurrency, crawlDelayMs, path
+/// filters, renderMode, respectRobots, ownership-sample flag). `summary` and
+/// `scores` are computed at finalize.
+model Crawl {
+  id              String          @id @default(cuid())
+  websiteId       String
+  organizationId  String
+  status          CrawlStatus     @default(QUEUED)
+  renderMode      CrawlRenderMode @default(STATIC)
+  requestedById   String?
+  config          Json
+  summary         Json?
+  scores          Json?
+  /// Progress counters updated as the crawl runs.
+  pagesCrawled    Int             @default(0)
+  pagesQueued     Int             @default(0)
+  issuesFound     Int             @default(0)
+  error           String?
+  blockedReason   String?
+  startedAt       DateTime?
+  finishedAt      DateTime?
+  /// Set when a pause is requested; the runner stops between pages and resumes.
+  pauseRequested  Boolean         @default(false)
+  cancelRequested Boolean         @default(false)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  website      Website      @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  pages        CrawlPage[]
+  links        CrawlLink[]
+  issues       CrawlIssue[]
+
+  @@index([organizationId, createdAt])
+  @@index([websiteId, createdAt])
+  @@map("crawls")
+}
+
+/// One analyzed URL within a crawl. `normalizedUrl` is the dedupe identity.
+model CrawlPage {
+  id             String @id @default(cuid())
+  crawlId        String
+  organizationId String
+  url            String
+  normalizedUrl  String
+  depth          Int    @default(0)
+  /// How this URL was discovered: "seed" | "link" | "sitemap" | "canonical" | "redirect".
+  discoveredVia  String @default("link")
+
+  // --- Fetch outcome ---
+  httpStatus     Int?
+  finalUrl       String?
+  redirectChain  Json    @default("[]")
+  fetchError     String?
+  contentType    String?
+  htmlBytes      Int?
+  responseTimeMs Int?
+  renderedWithJs Boolean @default(false)
+  fromCache      Boolean @default(false)
+
+  // --- Head / indexability ---
+  title                 String?
+  titleLength           Int?
+  metaDescription       String?  @db.Text
+  metaDescriptionLength Int?
+  metaRobots            String?
+  xRobotsTag            String?
+  canonicalUrl          String?
+  canonicalIsSelf       Boolean?
+  noindex               Boolean  @default(false)
+  robotsBlocked         Boolean  @default(false)
+  indexable             Boolean  @default(false)
+  indexabilityReason    String?
+  crawlable             Boolean  @default(true)
+
+  // --- Content / semantics ---
+  lang            String?
+  hreflang        Json     @default("[]")
+  h1Count         Int      @default(0)
+  headingOutline  Json     @default("[]")
+  wordCount       Int?
+  contentHash     String?
+  simhash         String?
+  ogTags          Json     @default("{}")
+  twitterTags     Json     @default("{}")
+  jsonLdTypes     String[]
+  jsonLdErrors    Json     @default("[]")
+  // Phase 6: top-level JSON-LD nodes as { type, name?, url?, id?, sameAs? } for
+  // entity-consistency checks by the AI SEO Agent.
+  jsonLdEntities  Json     @default("[]")
+  viewportMeta    Boolean  @default(false)
+  // Phase 6: semantic-HTML signals for the machine-readability analysis.
+  landmarkCount   Int      @default(0)
+  hasMainLandmark Boolean  @default(false)
+
+  // --- Images ---
+  imagesTotal      Int @default(0)
+  imagesMissingAlt Int @default(0)
+  imagesMissingDim Int @default(0)
+
+  // --- Links (counts; edges live in CrawlLink) ---
+  internalLinkCount    Int @default(0)
+  externalLinkCount    Int @default(0)
+  inboundInternalCount Int @default(0)
+
+  // --- Transport security ---
+  isHttps         Boolean @default(false)
+  securityHeaders Json    @default("{}")
+  mixedContent    Boolean @default(false)
+
+  // --- Rendering signal ---
+  csrLikely         Boolean @default(false)
+  staticWordCount   Int?
+  renderedWordCount Int?
+
+  createdAt DateTime @default(now())
+
+  crawl         Crawl        @relation(fields: [crawlId], references: [id], onDelete: Cascade)
+  outboundLinks CrawlLink[]  @relation("PageOutboundLinks")
+  issues        CrawlIssue[]
+  organization  Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([crawlId, normalizedUrl])
+  @@index([crawlId, depth])
+  @@index([crawlId, httpStatus])
+  @@index([organizationId])
+  @@map("crawl_pages")
+}
+
+/// A directed edge in the crawl's link graph.
+model CrawlLink {
+  id              String  @id @default(cuid())
+  crawlId         String
+  organizationId  String
+  fromPageId      String
+  toNormalizedUrl String
+  toPageId        String?
+  isInternal      Boolean @default(true)
+  isNofollow      Boolean @default(false)
+  rel             String?
+  anchorText      String?
+  /// Populated by the (sampled, capped) broken-link check.
+  statusAtCheck   Int?
+
+  crawl        Crawl        @relation(fields: [crawlId], references: [id], onDelete: Cascade)
+  fromPage     CrawlPage    @relation("PageOutboundLinks", fields: [fromPageId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([crawlId, toNormalizedUrl])
+  @@index([crawlId, fromPageId])
+  @@index([organizationId])
+  @@map("crawl_links")
+}
+
+enum CrawlIssueSeverity {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+  INFO
+}
+
+enum CrawlIssueStatus {
+  OPEN
+  FIXED
+  REGRESSED
+  IGNORED
+}
+
+/// One finding from the technical auditor. Identity across crawls of the same
+/// website is `(websiteId, code, normalizedUrl?)` so FIXED/REGRESSED carry over.
+model CrawlIssue {
+  id               String             @id @default(cuid())
+  crawlId          String
+  websiteId        String
+  organizationId   String
+  code             String
+  category         String
+  severity         CrawlIssueSeverity
+  pageId           String?
+  normalizedUrl    String?
+  title            String
+  detail           String             @db.Text
+  evidence         Json               @default("{}")
+  recommendedFix   String             @db.Text
+  confidence       Float              @default(0.8)
+  status           CrawlIssueStatus   @default(OPEN)
+  affectedUrlCount Int                @default(1)
+  createdAt        DateTime           @default(now())
+
+  crawl        Crawl        @relation(fields: [crawlId], references: [id], onDelete: Cascade)
+  website      Website      @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  page         CrawlPage?   @relation(fields: [pageId], references: [id], onDelete: SetNull)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([crawlId, code, normalizedUrl])
+  @@index([crawlId, category, severity])
+  @@index([websiteId, code])
+  @@index([organizationId])
+  @@map("crawl_issues")
+}
+
+// ===========================================================================
+// Phase 7 — Unified AI Growth Agent (orchestrator, conversations, memory, tasks)
+// ===========================================================================
+
+/// A chat thread with the Growth Agent. Soft-deletable; per-user within an org.
+model AIConversation {
+  id             String    @id @default(cuid())
+  organizationId String
+  userId         String
+  title          String    @default("New conversation")
+  lastMessageAt  DateTime  @default(now())
+  archivedAt     DateTime?
+  deletedAt      DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  messages     AIMessage[]
+  tasks        Task[]
+
+  @@index([organizationId, userId, lastMessageAt])
+  @@map("ai_conversations")
+}
+
+enum AIMessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+}
+
+/// One message in a conversation. Assistant messages carry the structured
+/// response blocks (analysis summary / evidence / decisions / recommendations /
+/// proposed actions) in `blocks` — never raw chain-of-thought.
+model AIMessage {
+  id             String        @id @default(cuid())
+  conversationId String
+  organizationId String
+  role           AIMessageRole
+  content        String        @db.Text
+  /// Structured blocks for an assistant turn (GrowthAgentResponse), or null.
+  blocks         Json?
+  agentRunId     String?
+  createdAt      DateTime      @default(now())
+
+  conversation AIConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  organization Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  agentRun     AgentRun?      @relation(fields: [agentRunId], references: [id], onDelete: SetNull)
+
+  @@index([conversationId, createdAt])
+  @@index([organizationId, createdAt])
+  @@map("ai_messages")
+}
+
+enum MemoryKind {
+  USER_GOAL
+  ORG_GOAL
+  PREFERENCE
+  PAST_RECOMMENDATION
+  COMPLETED_TASK
+  ACTIVE_PROJECT
+}
+
+/// Controlled long-term memory for the agent. Only the six kinds above are
+/// stored; free text is length-capped and secret-redacted at write time. A
+/// `userId` scopes user-specific goals/preferences; org goals leave it null.
+model OrgMemory {
+  id             String     @id @default(cuid())
+  organizationId String
+  userId         String?
+  kind           MemoryKind
+  /// Short label / dedupe key (e.g. "primary-goal").
+  label          String?
+  value          String     @db.Text
+  sourceType     String?    @default("manual") // manual | conversation | task | recommendation
+  sourceId       String?
+  confidence     Float      @default(1)
+  expiresAt      DateTime?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, kind])
+  @@map("org_memories")
+}
+
+enum TaskStatus {
+  PENDING
+  IN_PROGRESS
+  BLOCKED
+  DONE
+  CANCELLED
+}
+
+/// A recommendation the user promoted to trackable work.
+model Task {
+  id                     String               @id @default(cuid())
+  organizationId         String
+  createdById            String
+  domain                 RecommendationDomain @default(GROWTH)
+  title                  String
+  description            String               @db.Text
+  instructions           String               @db.Text
+  priority               String               @default("medium") // critical | high | medium | low
+  status                 TaskStatus           @default(PENDING)
+  affectedUrls           String[]
+  affectedRefs           String[]
+  sourceRecommendationId String?
+  sourceConversationId   String?
+  /// External-system actions (publish, metadata change) need explicit
+  /// confirmation via the owning feature's approval flow — never executed here.
+  requiresExternalAction Boolean              @default(false)
+  externalActionKind     String?
+  dueAt                  DateTime?
+  completedAt            DateTime?
+  createdAt              DateTime             @default(now())
+  updatedAt              DateTime             @updatedAt
+
+  organization Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  conversation AIConversation? @relation(fields: [sourceConversationId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, status])
+  @@index([organizationId, domain])
+  @@map("tasks")
+}
+
+// ===========================================================================
+// Phase 8 — Content repurposing engine
+// ===========================================================================
+
+enum RepurposeSourceType {
+  YOUTUBE_VIDEO
+  VIDEO_URL
+  TRANSCRIPT
+  MANUAL
+}
+
+enum RepurposeProjectStatus {
+  DRAFT
+  ANALYZING
+  ANALYZED
+  GENERATING
+  READY
+  ARCHIVED
+}
+
+/// The 13 generated content deliverables (master instruction, Phase 8).
+enum ContentAssetType {
+  YT_TITLE_ALTERNATIVES
+  YT_DESCRIPTION
+  YT_CHAPTERS
+  SHORTS_IDEA
+  TIKTOK_IDEA
+  TIKTOK_CAPTION
+  HOOK
+  SCRIPT
+  SOCIAL_POST
+  BLOG_IDEA
+  SEO_ARTICLE_OUTLINE
+  FAQ
+  NEWSLETTER_IDEA
+}
+
+enum ContentAssetStatus {
+  DRAFT
+  APPROVED
+  SCHEDULED
+  PUBLISHED
+  FAILED
+}
+
+/// One repurposing effort. The source is user-provided or read from a synced
+/// YouTube video — the engine never scrapes a transcript from a URL (ADR-0023).
+model RepurposeProject {
+  id                   String                 @id @default(cuid())
+  organizationId       String
+  createdById          String
+  name                 String
+  sourceType           RepurposeSourceType
+  status               RepurposeProjectStatus @default(DRAFT)
+  sourceYouTubeVideoId String?
+  sourceUrl            String?
+  sourceTitle          String?
+  sourceDescription    String?                @db.Text
+  sourceTranscript     String?                @db.Text
+  sourceBody           String?                @db.Text
+  sourceTags           String[]
+  sourceDurationSec    Int?
+  /// CONTENT ANALYSIS → KEY IDEAS → CONTENT ANGLES output (ContentAnalysis).
+  analysis             Json?
+  analysisAgentRunId   String?
+  analysisGrounded     Boolean                @default(true)
+  createdAt            DateTime               @default(now())
+  updatedAt            DateTime               @updatedAt
+  deletedAt            DateTime?
+
+  organization Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  assets       ContentAsset[]
+
+  @@index([organizationId, status])
+  @@map("repurpose_projects")
+}
+
+/// One generated, editable content piece. Its editable text lives in
+/// `ContentAssetVersion` rows (immutable snapshots); `currentVersionId` points
+/// at the live one. The engine NEVER auto-publishes.
+model ContentAsset {
+  id                  String             @id @default(cuid())
+  repurposeProjectId  String
+  organizationId      String
+  type                ContentAssetType
+  /// "youtube" | "tiktok" | "blog" | "newsletter" | "social" | "generic".
+  platform            String
+  title               String?
+  status              ContentAssetStatus @default(DRAFT)
+  currentVersionId    String?            @unique
+  /// The content angle this piece came from (from the analysis).
+  sourceAngle         String?
+  scheduledFor        DateTime?
+  publishedAt         DateTime?
+  /// "manual" — the engine only records that the user published elsewhere.
+  publishTarget       String?
+  failureReason       String?
+  createdByAgentRunId String?
+  approvedById        String?
+  approvedAt          DateTime?
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+
+  project        RepurposeProject      @relation(fields: [repurposeProjectId], references: [id], onDelete: Cascade)
+  organization   Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  versions       ContentAssetVersion[] @relation("AssetVersions")
+  currentVersion ContentAssetVersion?  @relation("AssetCurrentVersion", fields: [currentVersionId], references: [id], onDelete: SetNull)
+
+  @@index([repurposeProjectId, type])
+  @@index([organizationId, status])
+  @@map("content_assets")
+}
+
+/// An immutable version of a content asset's body. Linear history: an edit or a
+/// regeneration appends a new version; a revert appends a copy of an old one.
+model ContentAssetVersion {
+  id             String   @id @default(cuid())
+  contentAssetId String
+  organizationId String
+  versionNumber  Int
+  body           String   @db.Text
+  /// Structured payload (chapters, outline sections, hashtags, …).
+  structured     Json?
+  /// null ⇒ AI-generated; set ⇒ a human edit.
+  editedById     String?
+  editSummary    String?
+  createdAt      DateTime @default(now())
+
+  asset        ContentAsset  @relation("AssetVersions", fields: [contentAssetId], references: [id], onDelete: Cascade)
+  currentFor   ContentAsset? @relation("AssetCurrentVersion")
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([contentAssetId, versionNumber])
+  @@index([contentAssetId])
+  @@map("content_asset_versions")
+}
+
+// ===========================================================================
+// Phase 9 — Monetization intelligence
+// ===========================================================================
+
+enum MonetizationChannel {
+  PLATFORM_MONETIZATION
+  SPONSORSHIP
+  AFFILIATE
+  DIGITAL_PRODUCT
+  SERVICE
+  MEMBERSHIP
+  SUBSCRIPTION
+  LEAD_GENERATION
+  CONSULTING
+  COURSE
+  BRAND_PARTNERSHIP
+}
+
+enum OpportunityStatus {
+  SUGGESTED
+  IN_PROGRESS
+  ACTIVE
+  COMPLETED
+  DISMISSED
+}
+
+/// User-provided business context, one per org. Everything here is entered by
+/// the user; nothing is inferred from a third party without their input.
+model BusinessProfile {
+  id                  String   @id @default(cuid())
+  organizationId      String   @unique
+  updatedById         String?
+  niche               String?
+  audienceDescription String?  @db.Text
+  /// Existing products / services the creator already sells.
+  offerings           String[]
+  goals               String[]
+  audienceSizeNote    String?
+  emailListSize       Int?
+  hasWebsite          Boolean  @default(false)
+  sellsProducts       Boolean  @default(false)
+  doesSponsorships    Boolean  @default(false)
+  doesAffiliates      Boolean  @default(false)
+  doesConsulting      Boolean  @default(false)
+  hasMembership       Boolean  @default(false)
+  hasCourse           Boolean  @default(false)
+  /// YPP-style user attestations we cannot read from an API
+  /// ({ twoStep, noStrikes, adsenseLinked, regionEligible }).
+  attestations        Json?
+  notes               String?  @db.Text
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@map("business_profiles")
+}
+
+/// One identified monetization opportunity. `potential` / `difficulty` /
+/// `audienceFit` are always labelled estimates (`isEstimate = true`); they are
+/// never a currency figure. A PLATFORM_MONETIZATION opportunity never asserts
+/// the creator "qualifies" unless the official criteria/data confirm it
+/// (ADR-0024).
+model MonetizationOpportunity {
+  id               String              @id @default(cuid())
+  organizationId   String
+  channel          MonetizationChannel
+  title            String
+  description      String              @db.Text
+  status           OpportunityStatus   @default(SUGGESTED)
+  /// [{ statement, kind: fact|calculated_metric|assumption }]
+  evidence         Json                @default("[]")
+  audienceFit      String              @default("unknown") // strong | moderate | weak | unknown
+  difficulty       String              @default("medium") // low | medium | high
+  /// A labelled estimate: "Low" | "Moderate" | "High" (never a dollar amount).
+  potential        String              @default("Moderate")
+  potentialBasis   String              @db.Text
+  requiredActions  String[]
+  confidence       Float               @default(0.5)
+  isEstimate       Boolean             @default(true)
+  priorityScore    Float?
+  sourceAgentRunId String?
+  dismissedReason  String?
+  completedNote    String?
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, channel])
+  @@index([organizationId, status])
+  @@map("monetization_opportunities")
+}
+
+/// A revenue line the user manually entered (or authorized an import of).
+/// The engine NEVER invents revenue — every row here has a `createdById`.
+model RevenueEntry {
+  id             String              @id @default(cuid())
+  organizationId String
+  createdById    String
+  channel        MonetizationChannel
+  /// Free-text source, e.g. "YouTube AdSense", "Acme Q2 sponsorship".
+  source         String
+  amount         Decimal             @db.Decimal(14, 2)
+  currency       String              @default("USD")
+  periodStart    DateTime            @db.Date
+  periodEnd      DateTime            @db.Date
+  isRecurring    Boolean             @default(false)
+  note           String?
+  deletedAt      DateTime?
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, periodStart])
+  @@index([organizationId, channel])
+  @@map("revenue_entries")
+}
+
+// ===========================================================================
+// Phase 10 — Billing & usage (operator's "Phase 10")
+// ===========================================================================
+//
+// Stripe is the payment processor and the source of truth for money. We store
+// only ids + mirrored, non-sensitive metadata — never card data (ADR-0010,
+// ADR-0025). Plan *definitions* (prices, limits, features) live in the config
+// catalog `packages/services/src/billing/plans.ts`, not in a table, so prices
+// are never hard-coded across the app and never drift between code paths.
+
+enum BillingTier {
+  FREE
+  CREATOR
+  PRO
+  AGENCY
+  ENTERPRISE
+}
+
+enum BillingInterval {
+  MONTH
+  YEAR
+}
+
+/// Mirrors Stripe subscription status. `ACTIVE` + `TRIALING` are "good
+/// standing"; `PAST_DUE` / `UNPAID` keep access with a warning; the rest gate.
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  INCOMPLETE
+  INCOMPLETE_EXPIRED
+  UNPAID
+  PAUSED
+}
+
+/// The metered resources (master instruction "Track usage for: …").
+enum UsageMeter {
+  AI_REQUESTS
+  AI_TOKENS
+  CRAWLS
+  CRAWL_PAGES
+  CONNECTED_ACCOUNTS
+  REPORTS
+  CONTENT_GENERATIONS
+  SEATS
+}
+
+/// Where an `Entitlement` row came from. `PLAN` rows are derived from the
+/// catalog for the current tier and rewritten on every plan change; `OVERRIDE`
+/// and `PROMO` are support-granted exceptions that win over `PLAN`.
+enum EntitlementSource {
+  PLAN
+  OVERRIDE
+  PROMO
+}
+
+enum BillingEventStatus {
+  RECEIVED
+  PROCESSED
+  FAILED
+  SKIPPED
+}
+
+/// One row per organization. A FREE org has a row with no Stripe ids.
+model Subscription {
+  id                   String             @id @default(cuid())
+  organizationId       String             @unique
+  tier                 BillingTier        @default(FREE)
+  status               SubscriptionStatus @default(ACTIVE)
+  interval             BillingInterval    @default(MONTH)
+  seats                Int                @default(1)
+  stripeCustomerId     String?            @unique
+  stripeSubscriptionId String?            @unique
+  stripePriceId        String?
+  currentPeriodStart   DateTime?
+  currentPeriodEnd     DateTime?
+  cancelAtPeriodEnd    Boolean            @default(false)
+  canceledAt           DateTime?
+  trialEndsAt          DateTime?
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@map("subscriptions")
+}
+
+/// Resolved limits / feature flags for an org. `limitValue` is used for meter
+/// caps (`key = "limit:<METER>"`, null ⇒ unlimited); `boolValue` for feature
+/// flags (`key = "feature:<name>"`).
+model Entitlement {
+  id             String            @id @default(cuid())
+  organizationId String
+  key            String
+  limitValue     BigInt?
+  boolValue      Boolean?
+  source         EntitlementSource @default(PLAN)
+  note           String?
+  createdById    String?
+  expiresAt      DateTime?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, key])
+  @@index([organizationId])
+  @@map("entitlements")
+}
+
+/// Append-only ledger of metered events. `idempotencyKey` makes a double-submit
+/// a no-op. Rolls up into `UsageCounter`.
+model UsageRecord {
+  id             String     @id @default(cuid())
+  organizationId String
+  meter          UsageMeter
+  quantity       BigInt
+  periodStart    DateTime
+  actorId        String?
+  subjectType    String?
+  subjectId      String?
+  costUsd        Decimal?   @db.Decimal(14, 6)
+  idempotencyKey String     @unique
+  metadata       Json?
+  occurredAt     DateTime   @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, meter, occurredAt])
+  @@index([organizationId, meter, periodStart])
+  @@map("usage_records")
+}
+
+/// Materialized per-period counter. `usage.check` reads this; `usage.record`
+/// updates it transactionally. Self-healing: a rollup rebuilds `used` from
+/// `UsageRecord`.
+model UsageCounter {
+  id             String     @id @default(cuid())
+  organizationId String
+  meter          UsageMeter
+  periodStart    DateTime
+  periodEnd      DateTime
+  used           BigInt     @default(0)
+  limitValue     BigInt?
+  updatedAt      DateTime   @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, meter, periodStart])
+  @@index([organizationId, meter])
+  @@map("usage_counters")
+}
+
+/// Read-only mirror of a Stripe invoice. Amounts are integer minor units, as
+/// Stripe sends them. No line-item or card data is stored.
+model Invoice {
+  id               String    @id @default(cuid())
+  organizationId   String
+  stripeInvoiceId  String    @unique
+  number           String?
+  status           String
+  amountDue        Int       @default(0)
+  amountPaid       Int       @default(0)
+  amountRemaining  Int       @default(0)
+  currency         String    @default("usd")
+  hostedInvoiceUrl String?
+  invoicePdfUrl    String?
+  periodStart      DateTime?
+  periodEnd        DateTime?
+  issuedAt         DateTime?
+  createdAt        DateTime  @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, createdAt])
+  @@map("invoices")
+}
+
+/// Idempotency ledger for Stripe webhooks. The row id IS the Stripe event id;
+/// a redelivery finds the row and is skipped (ADR-0025). Non-tenant: some
+/// events (e.g. an early `customer.created`) cannot be mapped to an org yet.
+model BillingEvent {
+  id          String             @id
+  type        String
+  status      BillingEventStatus @default(RECEIVED)
+  payload     Json
+  error       String?
+  receivedAt  DateTime           @default(now())
+  processedAt DateTime?
+
+  @@index([type, receivedAt])
+  @@map("billing_events")
+}
+
+// ===========================================================================
+// Phase 11 — Reporting (operator's "Phase 11")
+// ===========================================================================
+//
+// A `Report` is an **immutable snapshot** of one analysis at one point in time
+// (ADR-0026). Once `status = READY` the `snapshot` JSON is never mutated;
+// regenerating creates a NEW row that points at the previous one via
+// `previousReportId` for the "Historical Changes" section. Exports (PDF / CSV /
+// JSON) are rendered on demand from the snapshot, so they can never drift.
+
+enum ReportType {
+  YOUTUBE
+  TIKTOK
+  SEO
+  WEBSITE_HEALTH
+  AI_RECOMMENDATIONS
+  GROWTH
+  MONETIZATION
+}
+
+enum ReportStatus {
+  PENDING
+  BUILDING
+  READY
+  FAILED
+}
+
+model Report {
+  id                    String       @id @default(cuid())
+  organizationId        String
+  type                  ReportType
+  title                 String
+  status                ReportStatus @default(PENDING)
+  /// The full `ReportSnapshot` (packages/core `schemas/report.ts`). Written once
+  /// when the report becomes READY.
+  snapshot              Json?
+  /// Generation inputs (e.g. { websiteId, crawlId, periodDays }).
+  params                Json         @default("{}")
+  /// Opaque reference to the primary subject (channel id, website id, …).
+  subjectRef            String?
+  periodStart           DateTime?
+  periodEnd             DateTime?
+  /// Latest timestamp of the underlying data at build time.
+  dataThrough           DateTime?
+  /// The prior report of the same type this one was diffed against.
+  previousReportId      String?
+  generatedByAgentRunId String?
+  requestedById         String
+  error                 String?
+  /// Public share link. Token is 32 random bytes (base64url); the public view
+  /// serves a REDACTED snapshot only (docs/SECURITY.md — no private account
+  /// info through public URLs).
+  shareToken            String?      @unique
+  shareExpiresAt        DateTime?
+  shareRevokedAt        DateTime?
+  shareCreatedById      String?
+  createdAt             DateTime     @default(now())
+  finishedAt            DateTime?
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, type, createdAt])
+  @@index([organizationId, createdAt])
+  @@map("reports")
+}
+
+// ===========================================================================
+// Phase 12 — Automation engine (operator's "Phase 12")
+// ===========================================================================
+//
+// An `AutomationRule` is a stored recurring job an org member configures
+// ("Analyze my YouTube channel every Monday"). A BullMQ repeatable "sweep" in
+// the worker finds due rules and enqueues one `AutomationRun` each. Every run
+// is idempotent (`@@unique([automationRuleId, scheduledFor])`), retried with
+// exponential backoff up to `maxRetries`, and re-checks the OWNER's RBAC at
+// execution time — an automation can never exceed its owner's permissions
+// (ADR-0027). No task type performs an external publish.
+
+enum AutomationTaskType {
+  YOUTUBE_ANALYSIS
+  TIKTOK_ANALYSIS
+  WEBSITE_CRAWL
+  SEO_ISSUE_ALERT
+  MONETIZATION_SCAN
+  GROWTH_REPORT
+  CONTENT_OPPORTUNITY
+}
+
+enum AutomationCadence {
+  DAILY
+  WEEKLY
+  MONTHLY
+  CUSTOM
+}
+
+enum AutomationStatus {
+  ACTIVE
+  PAUSED
+  /// 5+ consecutive failed executions — still scheduled, surfaced to the user.
+  FAILING
+  /// 10+ consecutive failures — the sweep skips it until the user re-enables.
+  DISABLED
+}
+
+enum AutomationRunStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  FAILED
+  /// The owner lost the permission the task needs — not run.
+  SKIPPED
+  RETRY_SCHEDULED
+  CANCELLED
+}
+
+model AutomationRule {
+  id             String               @id @default(cuid())
+  organizationId String
+  /// The member whose permissions every execution runs under.
+  ownerId        String
+  createdById    String
+  taskType       AutomationTaskType
+  name           String
+  cadence        AutomationCadence
+  /// 5-field cron (min hour dom mon dow), evaluated in UTC (ADR-0027).
+  cronExpression String
+  /// Stored for a future timezone-aware evaluation; runs are UTC for now.
+  timezone       String               @default("UTC")
+  /// Task-type-specific settings, validated by a Zod schema per type.
+  config         Json                 @default("{}")
+  status         AutomationStatus     @default(ACTIVE)
+  maxRetries     Int                  @default(3)
+  lastRunAt      DateTime?
+  lastRunStatus  AutomationRunStatus?
+  nextRunAt      DateTime?
+  /// Consecutive failed executions; reset to 0 on any success.
+  failureCount   Int                  @default(0)
+  totalRuns      Int                  @default(0)
+  lastError      String?
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+
+  organization Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  runs         AutomationRun[]
+
+  @@index([organizationId, status])
+  @@index([status, nextRunAt])
+  @@map("automation_rules")
+}
+
+model AutomationRun {
+  id               String              @id @default(cuid())
+  automationRuleId String
+  organizationId   String
+  /// The scheduled tick this run belongs to. Unique with the rule id so a
+  /// double sweep / worker restart cannot execute the same tick twice.
+  scheduledFor     DateTime
+  status           AutomationRunStatus @default(PENDING)
+  attempt          Int                 @default(1)
+  triggeredBy      String              @default("schedule")
+  startedAt        DateTime?
+  finishedAt       DateTime?
+  durationMs       Int?
+  /// Compact structured summary of what the run produced.
+  output           Json?
+  error            String?
+  /// Set when `status = RETRY_SCHEDULED`.
+  nextAttemptAt    DateTime?
+  createdAt        DateTime            @default(now())
+
+  rule         AutomationRule @relation(fields: [automationRuleId], references: [id], onDelete: Cascade)
+  organization Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([automationRuleId, scheduledFor])
+  @@index([automationRuleId, createdAt])
+  @@index([organizationId, createdAt])
+  @@index([status, nextAttemptAt])
+  @@map("automation_runs")
+}
+
+// ===========================================================================
+// Phase 13 — Admin & observability (operator's "Phase 13")
+// ===========================================================================
+//
+// Two operational tables, both NON-TENANT (no organizationId FK — like
+// BillingEvent): they must outlive the org they may mention and are only ever
+// read by platform staff through /admin. No secret or token material is
+// written here: `observability.captureError` scrubs the message + stack of
+// anything key-shaped before it persists a row (docs/OBSERVABILITY.md §5).
+
+enum ErrorSource {
+  WEB
+  WORKER
+}
+
+/// A de-duplicated application error. `fingerprint` folds repeated occurrences
+/// of the same fault into one row with a bumped `count` / `lastSeenAt`, so a
+/// storm of the same bug cannot flood the table.
+model ErrorEvent {
+  id             String      @id @default(cuid())
+  fingerprint    String      @unique
+  source         ErrorSource
+  name           String      @default("Error")
+  message        String      @db.Text
+  stack          String?     @db.Text
+  route          String?
+  method         String?
+  statusCode     Int?
+  correlationId  String?
+  organizationId String?
+  actorId        String?
+  count          Int         @default(1)
+  context        Json?
+  firstSeenAt    DateTime    @default(now())
+  lastSeenAt     DateTime    @default(now())
+
+  @@index([lastSeenAt])
+  @@index([source, lastSeenAt])
+  @@map("error_events")
+}
+
+/// One row per running worker process, refreshed on a short interval. Row
+/// staleness is how /admin and /api/health learn the worker fleet is down;
+/// `queues` is the last queue-depth snapshot the worker observed.
+model WorkerHeartbeat {
+  id            String   @id @default(cuid())
+  workerId      String   @unique
+  version       String?
+  bootAt        DateTime @default(now())
+  lastBeatAt    DateTime @default(now())
+  redisOk       Boolean  @default(true)
+  queues        Json     @default("{}")
+  jobsProcessed BigInt   @default(0)
+  jobsFailed    BigInt   @default(0)
+
+  @@index([lastBeatAt])
+  @@map("worker_heartbeats")
+}
+
+// ===========================================================================
+// Phase 19 — Notifications
+// ===========================================================================
+//
+// In-app notifications for events the user cares about (a crawl finished, a
+// report is ready, an automation is failing, an invitation was sent). Written
+// by `notifications.createNotification` — non-throwing, like `recordAudit`, so
+// a notification-write failure can never break the operation that triggered it.
+// Email fan-out happens only when a real transport (Resend / SMTP) is
+// configured; digests are not implemented.
+
+enum NotificationLevel {
+  INFO
+  SUCCESS
+  WARNING
+  CRITICAL
+}
+
+model Notification {
+  id             String            @id @default(cuid())
+  organizationId String
+  /// The member this is for. Null ⇒ org-wide (shown to every member).
+  userId         String?
+  kind           String
+  level          NotificationLevel @default(INFO)
+  title          String
+  body           String            @db.Text
+  /// In-app deep link, e.g. "/app/reports/abc123".
+  linkPath       String?
+  /// Idempotency key so a retried job does not create a duplicate row
+  /// (e.g. "crawl:<id>:done"). Unique when present.
+  dedupeKey      String?           @unique
+  sourceType     String?
+  sourceId       String?
+  readAt         DateTime?
+  emailedAt      DateTime?
+  createdAt      DateTime          @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User?        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, userId, createdAt])
+  @@index([userId, readAt])
+  @@map("notifications")
+}
+
+// ===========================================================================
+// Phase 20 — Google Search Console integration
+// ===========================================================================
+//
+// GSC reuses the shared `OAuthConnection` (provider `GOOGLE_SEARCH_CONSOLE`,
+// same encrypted-at-rest token handling as YouTube). A `SearchConsoleSite` is
+// one verified/unverified property the connected Google account can access; the
+// org selects one as active. `SearchConsoleSnapshot` rows are point-in-time
+// captures of the official API's output (search analytics, sitemaps, URL
+// inspection) — the dashboard and the SEO agent read the latest snapshot so a
+// GSC metric is always Google's own reported number, never synthesised.
+
+enum SearchConsolePermission {
+  SITE_OWNER
+  SITE_FULL_USER
+  SITE_RESTRICTED_USER
+  SITE_UNVERIFIED_USER
+  UNKNOWN
+}
+
+enum SearchConsolePropertyType {
+  DOMAIN
+  URL_PREFIX
+}
+
+enum SearchConsoleSnapshotKind {
+  PERFORMANCE
+  SITEMAPS
+  URL_INSPECTION
+}
+
+model SearchConsoleSite {
+  id                String                   @id @default(cuid())
+  organizationId    String
+  oauthConnectionId String
+  /// The GSC property id: "sc-domain:example.com" or "https://example.com/".
+  siteUrl           String
+  propertyType      SearchConsolePropertyType
+  /// Registrable hostname, for matching to a crawled `Website`.
+  hostname          String
+  permissionLevel   SearchConsolePermission   @default(UNKNOWN)
+  verified          Boolean                   @default(false)
+  isSelected        Boolean                   @default(false)
+  lastSyncedAt      DateTime?
+  lastPerformanceAt DateTime?
+  createdAt         DateTime                  @default(now())
+  updatedAt         DateTime                  @updatedAt
+
+  organization Organization            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  connection   OAuthConnection         @relation(fields: [oauthConnectionId], references: [id], onDelete: Cascade)
+  snapshots    SearchConsoleSnapshot[]
+
+  @@unique([organizationId, siteUrl])
+  @@index([organizationId])
+  @@index([oauthConnectionId])
+  @@index([organizationId, hostname])
+  @@map("search_console_sites")
+}
+
+model SearchConsoleSnapshot {
+  id                  String                   @id @default(cuid())
+  organizationId      String
+  searchConsoleSiteId String
+  kind                SearchConsoleSnapshotKind
+  /// For URL_INSPECTION: the inspected URL (one snapshot per URL, latest wins).
+  subjectUrl          String?
+  rangeStart          DateTime?                @db.Date
+  rangeEnd            DateTime?                @db.Date
+  /// Zod-validated capture of the official API output (see searchconsole/schemas.ts).
+  data                Json
+  capturedAt          DateTime                 @default(now())
+
+  organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  site         SearchConsoleSite @relation(fields: [searchConsoleSiteId], references: [id], onDelete: Cascade)
+
+  @@index([searchConsoleSiteId, kind, capturedAt])
+  @@index([organizationId])
+  @@map("search_console_snapshots")
+}

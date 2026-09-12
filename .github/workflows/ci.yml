@@ -1,0 +1,166 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AUTH_SECRET: ci-insecure-secret-value-0123456789abcdef
+  NEXT_PUBLIC_APP_URL: http://localhost:3000
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: growth_agent
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/growth_agent
+      DIRECT_URL: postgresql://postgres:postgres@localhost:5432/growth_agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 10 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm db:generate
+      - run: pnpm --filter @growth-agent/db migrate:deploy
+
+      - run: pnpm format:check
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm test:scripts # scripts/check-env.mjs contract
+      - run: node scripts/check-tenant-scope.mjs # app-layer tenant-isolation backstop (RLS deferred — ADR-0035)
+      - run: pnpm --filter @growth-agent/db test:integration
+      - run: pnpm --filter @growth-agent/services test:integration
+
+      # Exercise the Next standalone output the Docker image depends on (Linux
+      # CI has no Windows EPERM issue). FORENSIC-AUDIT D-1.
+      - name: Next standalone build
+        run: pnpm --filter @growth-agent/web build
+        env:
+          NEXT_OUTPUT_STANDALONE: '1'
+          NEXT_TELEMETRY_DISABLED: '1'
+
+      # Fails on any NEW moderate+/high/critical advisory; known-unavoidable ones
+      # are listed with a reason in .audit-allowlist.json. FORENSIC-AUDIT D-5 / S-2.
+      - name: Security audit gate
+        run: node scripts/audit-allow.mjs
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build web image
+        run: docker build -f Dockerfile.web -t growth-agent-web:ci .
+      - name: Build worker image
+        run: docker build -f Dockerfile.worker -t growth-agent-worker:ci .
+
+      # Boot the images against throwaway Postgres + Redis and assert the health
+      # endpoints answer. FORENSIC-AUDIT D-1 (this replaces the old
+      # `docker buildx build --call=check` lint).
+      - name: Compose smoke test
+        run: |
+          set -euo pipefail
+          docker network create ga-ci
+          docker run -d --name pg  --network ga-ci -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=growth_agent postgres:16
+          docker run -d --name rd  --network ga-ci redis:7-alpine
+          for i in $(seq 1 30); do docker exec pg pg_isready -U postgres && break; sleep 2; done
+
+          ENV="-e NODE_ENV=production \
+            -e DATABASE_URL=postgresql://postgres:postgres@pg:5432/growth_agent \
+            -e DIRECT_URL=postgresql://postgres:postgres@pg:5432/growth_agent \
+            -e REDIS_URL=redis://rd:6379 \
+            -e AUTH_SECRET=ci-insecure-secret-value-0123456789abcdef0123 \
+            -e ENCRYPTION_KEY=ci-insecure-encryption-key-0123456789abcdef01 \
+            -e AUTH_URL=https://ci.example.com \
+            -e NEXT_PUBLIC_APP_URL=https://ci.example.com \
+            -e RESEND_API_KEY=ci-dummy"
+
+          docker run --rm --network ga-ci $ENV --entrypoint pnpm growth-agent-worker:ci --filter @growth-agent/db migrate:deploy
+
+          docker run -d --name web    --network ga-ci $ENV -p 3000:3000 growth-agent-web:ci
+          docker run -d --name worker --network ga-ci $ENV -e WORKER_HEALTH_PORT=9090 growth-agent-worker:ci
+
+          ok=0
+          for i in $(seq 1 40); do
+            if curl -fsS http://localhost:3000/api/health | grep -q '"status"'; then ok=1; break; fi
+            sleep 3
+          done
+          docker logs web | tail -n 40 || true
+          docker logs worker | tail -n 20 || true
+          test "$ok" = "1"
+          docker exec worker wget -q --spider http://127.0.0.1:9090/healthz
+
+  e2e:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: growth_agent
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/growth_agent
+      DIRECT_URL: postgresql://postgres:postgres@localhost:5432/growth_agent
+      # Activates the authenticated browser workflows in e2e/{authed,journey,
+      # failures,security}.spec.ts. They mint a NextAuth session cookie for a
+      # user they seed directly, so they need the (already-provisioned)
+      # Postgres and a matching AUTH_SECRET (both the Playwright webServer and
+      # the specs fall back to the same constant when AUTH_SECRET is unset).
+      E2E_AUTHED: '1'
+      # `playwright.config.ts`'s webServer already sets
+      # GROWTH_AGENT_ENV_STRICT=0 for this exact reason: `next start` here
+      # boots under NODE_ENV=production with a localhost NEXT_PUBLIC_APP_URL
+      # and no AUTH_URL/ENCRYPTION_KEY/sign-in path — a production *build*
+      # under test, not a production *deployment* — so config/env.ts's
+      # prod-strict footgun checks are relaxed (type-checking still runs on
+      # whatever is provided). Without it every route touching
+      # @growth-agent/services 500s, including /api/health.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 10 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm db:generate
+      - run: pnpm --filter @growth-agent/db migrate:deploy
+      - run: pnpm --filter @growth-agent/web exec playwright install --with-deps chromium
+      - run: pnpm --filter @growth-agent/web build
+      - run: pnpm --filter @growth-agent/web test:e2e
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: apps/web/playwright-report/
+          retention-days: 7

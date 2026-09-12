@@ -1,0 +1,29 @@
+{
+  "$comment": "Advisories accepted for now, with a reason and a review-by date. scripts/audit-allow.mjs fails CI on any HIGH/CRITICAL/MODERATE advisory NOT listed here. Match is by GHSA id OR module name. Review-by dates are advisory, not enforced — but a stale entry is a signal to re-check.",
+  "allow": [
+    {
+      "id": "GHSA-cc9r-2j5m-2m83",
+      "module": "nodemailer",
+      "reason": "Fixed in nodemailer>=9.1.0, but @auth/core@0.41.3 (via next-auth@5 beta) hard-pins the peer to '^7.0.7 || ^8.0.5'. Mitigations in place: no `raw` option, single EMAIL_RE-validated recipient, fixed `from`, 5/hour/email send cap. New Resend HTTP transport (no nodemailer) is the recommended prod path. Bump the moment the peer relaxes.",
+      "reviewBy": "2026-12-01"
+    },
+    {
+      "id": "GHSA-rwvc-j5jr-mgvh",
+      "module": "ai",
+      "reason": "Vercel AI SDK filetype-whitelist bypass on file UPLOADS. The app never uploads files through the AI SDK. Fixed in ai>=5.0.52; migrating to AI SDK v5 is a breaking major scheduled as its own phase.",
+      "reviewBy": "2026-12-01"
+    },
+    {
+      "id": "GHSA-866g-f22w-33x8",
+      "module": "@ai-sdk/provider-utils",
+      "reason": "Uncontrolled resource consumption in @ai-sdk/provider-utils<3.0.28, transitive via @ai-sdk/*. Same AI SDK v5 upgrade covers it. Provider calls are our own, bounded, and server-side only.",
+      "reviewBy": "2026-12-01"
+    },
+    {
+      "id": "GHSA-9965-vmph-33xx",
+      "module": "deepmerge-ts",
+      "reason": "Prototype-pollution class issue in deepmerge-ts<8, transitive via the Prisma CLI at build time only. No attacker-controlled input reaches it. Clears when prisma is bumped.",
+      "reviewBy": "2026-12-01"
+    }
+  ]
+}

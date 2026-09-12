@@ -1,0 +1,68 @@
+# syntax=docker/dockerfile:1.7
+###############################################################################
+# Growth Agent — worker image (BullMQ processors + schedulers + heartbeat).
+#
+#   docker build -f Dockerfile.worker -t growth-agent-worker:$(git rev-parse --short HEAD) .
+#
+# The monorepo consumes `packages/*` as TypeScript source, so the worker runs
+# from source with `tsx` (same mechanism as `pnpm dev`) rather than a bundled
+# dist. Playwright's Chromium is installed for headless SEO rendering.
+# See docs/DEPLOYMENT.md §14–15.
+###############################################################################
+
+ARG NODE_VERSION=20.11.0
+ARG PLAYWRIGHT_VERSION=1.49.1
+
+FROM node:${NODE_VERSION}-bookworm-slim AS base
+ENV PNPM_HOME=/pnpm PATH=/pnpm:$PATH CI=true NODE_ENV=production
+RUN corepack enable && corepack prepare pnpm@10.14.0 --activate
+WORKDIR /app
+
+# --- deps: install once, cached on the lockfile -----------------------
+FROM base AS deps
+COPY pnpm-lock.yaml pnpm-workspace.yaml package.json .npmrc ./
+COPY apps/web/package.json               apps/web/package.json
+COPY apps/worker/package.json            apps/worker/package.json
+COPY packages/core/package.json          packages/core/package.json
+COPY packages/ai/package.json            packages/ai/package.json
+COPY packages/db/package.json            packages/db/package.json
+COPY packages/ui/package.json            packages/ui/package.json
+COPY packages/services/package.json      packages/services/package.json
+COPY packages/observability/package.json packages/observability/package.json
+RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
+    pnpm install --frozen-lockfile --prefer-offline
+
+# --- build: sources + generated Prisma client + a typecheck ----------
+FROM deps AS build
+COPY . .
+RUN pnpm db:generate && pnpm --filter @growth-agent/worker build
+
+# --- runner ---------------------------------------------------------
+FROM node:${NODE_VERSION}-bookworm-slim AS runner
+ARG PLAYWRIGHT_VERSION
+ENV NODE_ENV=production WORKER_HEALTH_PORT=9090 \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright PNPM_HOME=/pnpm PATH=/pnpm:$PATH
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates wget \
+ && rm -rf /var/lib/apt/lists/* \
+ && corepack enable && corepack prepare pnpm@10.14.0 --activate \
+ && addgroup --system --gid 1001 nodejs \
+ && adduser  --system --uid 1001 worker \
+ && mkdir -p /ms-playwright && chown worker:nodejs /ms-playwright
+
+# Whole workspace + resolved node_modules (workspace pkgs are consumed as TS
+# source, so the worker needs them present, not compiled).
+COPY --from=build --chown=worker:nodejs /app ./
+
+# Chromium for headless SEO rendering (own layer — caches independently).
+RUN pnpm --dir apps/worker exec playwright install --with-deps chromium
+
+USER worker
+EXPOSE 9090
+
+# Liveness: the worker's own HTTP listener (apps/worker/src/health-server.ts).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD wget -q --spider "http://127.0.0.1:${WORKER_HEALTH_PORT}/healthz" || exit 1
+
+CMD ["pnpm", "--filter", "@growth-agent/worker", "start"]

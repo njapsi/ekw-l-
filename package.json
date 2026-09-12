@@ -1,0 +1,73 @@
+{
+  "name": "growth-agent",
+  "version": "0.0.0",
+  "private": true,
+  "description": "AI-powered Growth Agent — production SaaS for YouTube/TikTok creators, website owners, and SEO professionals.",
+  "packageManager": "pnpm@10.14.0",
+  "engines": {
+    "node": ">=20.11.0",
+    "pnpm": ">=10"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "test:scripts": "vitest run",
+    "test:e2e": "turbo run test:e2e",
+    "check:env": "node scripts/check-env.mjs",
+    "check:tenant": "node scripts/check-tenant-scope.mjs",
+    "check:audit": "node scripts/audit-allow.mjs",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md,mjs,cjs}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md,mjs,cjs}\"",
+    "clean": "turbo run clean && rimraf node_modules",
+    "db:generate": "pnpm --filter @growth-agent/db generate",
+    "db:migrate": "pnpm --filter @growth-agent/db migrate",
+    "db:studio": "pnpm --filter @growth-agent/db studio",
+    "prepare": "husky || true"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.18.0",
+    "@types/node": "^22.10.5",
+    "eslint": "^9.18.0",
+    "eslint-config-prettier": "^9.1.0",
+    "typescript-eslint": "^8.20.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^15.3.0",
+    "prettier": "^3.4.2",
+    "prettier-plugin-tailwindcss": "^0.6.9",
+    "rimraf": "^6.0.1",
+    "tsx": "^4.19.2",
+    "turbo": "^2.3.3",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8",
+    "@vitest/coverage-v8": "^2.1.8"
+  },
+  "lint-staged": {
+    "*.{ts,tsx,js,jsx,mjs,cjs}": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{json,md,css}": [
+      "prettier --write"
+    ]
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@prisma/client",
+      "@prisma/engines",
+      "@sentry/cli",
+      "esbuild",
+      "msgpackr-extract",
+      "prisma",
+      "unrs-resolver"
+    ],
+    "overrides": {
+      "@auth/core": ">=0.41.3",
+      "jsondiffpatch": ">=0.7.6",
+      "postcss@<8.5.23": ">=8.5.23",
+      "rollup@<4.22.4": ">=4.22.4"
+    }
+  }
+}

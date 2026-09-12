@@ -1,0 +1,37 @@
+# Growth Agent — reverse proxy / TLS terminator (docker-compose.production.yml).
+# Caddy fetches + renews a Let's Encrypt certificate automatically.
+
+{
+	email {$TLS_EMAIL}
+	# servers { protocols h1 h2 h3 }
+}
+
+# Redirect the apex/other hosts to the canonical domain so AUTH_URL is stable
+# (docs/SECURITY-AUDIT.md I-2: the app trusts the Host header).
+{$APP_DOMAIN} {
+	encode zstd gzip
+
+	# Immutable, content-hashed assets — cache hard (a CDN in front still helps).
+	@static path /_next/static/* /fonts/* /favicon.ico
+	header @static Cache-Control "public, max-age=31536000, immutable"
+
+	# Never let an intermediary cache an authenticated document.
+	@app path /app/* /admin/* /api/*
+	header @app Cache-Control "no-store"
+
+	reverse_proxy web:3000 {
+		header_up X-Forwarded-Proto https
+		header_up X-Forwarded-Host {host}
+		header_up Host {host}
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}
+
+# Anything that isn't the canonical host → 308 to it.
+:443 {
+	redir https://{$APP_DOMAIN}{uri} permanent
+}

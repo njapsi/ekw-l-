@@ -1,0 +1,70 @@
+# syntax=docker/dockerfile:1.7
+###############################################################################
+# Growth Agent — web image (Next.js 15 standalone).
+#
+#   docker build -f Dockerfile.web -t growth-agent-web:$(git rev-parse --short HEAD) .
+#
+# Multi-stage: install → build (Next standalone) → tiny non-root runner.
+# The standalone bundle already contains the traced node_modules + the
+# transpiled workspace packages, so the runner needs no pnpm and no source.
+# See docs/DEPLOYMENT.md §13.
+###############################################################################
+
+ARG NODE_VERSION=20.11.0
+
+# --- base -------------------------------------------------------------------
+FROM node:${NODE_VERSION}-bookworm-slim AS base
+ENV PNPM_HOME=/pnpm PATH=/pnpm:$PATH CI=true
+RUN corepack enable && corepack prepare pnpm@10.14.0 --activate
+WORKDIR /app
+
+# --- deps: install once, cached on the lockfile --------------------------
+FROM base AS deps
+COPY pnpm-lock.yaml pnpm-workspace.yaml package.json .npmrc ./
+COPY apps/web/package.json            apps/web/package.json
+COPY apps/worker/package.json         apps/worker/package.json
+COPY packages/core/package.json       packages/core/package.json
+COPY packages/ai/package.json         packages/ai/package.json
+COPY packages/db/package.json         packages/db/package.json
+COPY packages/ui/package.json         packages/ui/package.json
+COPY packages/services/package.json   packages/services/package.json
+COPY packages/observability/package.json packages/observability/package.json
+RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
+    pnpm install --frozen-lockfile --prefer-offline
+
+# --- build: generate Prisma client + Next standalone --------------------
+FROM base AS build
+ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 NEXT_OUTPUT_STANDALONE=1
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+RUN pnpm db:generate \
+ && pnpm --filter @growth-agent/web build
+
+# --- runner: minimal, non-root ----------------------------------------
+FROM node:${NODE_VERSION}-bookworm-slim AS runner
+ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 PORT=3000 HOSTNAME=0.0.0.0
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends wget \
+ && rm -rf /var/lib/apt/lists/* \
+ && addgroup --system --gid 1001 nodejs \
+ && adduser  --system --uid 1001 nextjs
+
+# Next's standalone output: server.js + traced node_modules + workspace pkgs.
+COPY --from=build --chown=nextjs:nodejs /app/apps/web/.next/standalone/ ./
+COPY --from=build --chown=nextjs:nodejs /app/apps/web/.next/static       ./apps/web/.next/static
+COPY --from=build --chown=nextjs:nodejs /app/apps/web/public             ./apps/web/public
+# Prisma query engine — belt & suspenders in case tracing missed the .node.
+COPY --from=build --chown=nextjs:nodejs /app/node_modules/.prisma        ./node_modules/.prisma
+
+USER nextjs
+EXPOSE 3000
+
+# Liveness only — /api/health always 200s when the process is up; the body's
+# `status` (ok|degraded|down) is for the load balancer + /admin, not the
+# container probe. The app self-validates its environment at boot
+# (packages/services/src/config/env.ts, imported by the root layout) and aborts
+# with a field list if a required production variable is missing/malformed.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+  CMD wget -q --spider http://127.0.0.1:3000/api/health || exit 1
+
+CMD ["node", "apps/web/server.js"]

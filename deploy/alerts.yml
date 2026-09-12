@@ -1,0 +1,119 @@
+# Growth Agent — Prometheus alerting rules.
+# Thresholds are conservative starting points — tune to your traffic.
+# Metric names come from packages/services/src/observability/metrics.ts.
+
+groups:
+  - name: growth-agent.availability
+    rules:
+      - alert: TargetDown
+        expr: up{job=~"growth-agent-.*"} == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: '{{ $labels.job }} is not being scraped'
+          description: 'Prometheus cannot reach {{ $labels.instance }} for 2m — the process is likely down or unhealthy.'
+
+      - alert: WorkerAbsent
+        # The worker is the only scrape source of job_* metrics.
+        expr: absent(up{job="growth-agent-worker"} == 1)
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: 'No healthy worker'
+          description: 'The BullMQ worker fleet has no healthy instance — scheduled automations, syncs and crawls are stalled.'
+
+  - name: growth-agent.errors
+    rules:
+      - alert: HighHttpErrorRate
+        expr: |
+          sum(rate(http_errors_total[5m]))
+            / clamp_min(sum(rate(http_requests_total[5m])), 0.001) > 0.05
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: '5xx rate above 5%'
+          description: '{{ $value | humanizePercentage }} of requests are 5xx over the last 10m.'
+
+      - alert: ErrorEventsSpike
+        expr: sum(rate(errors_captured_total[10m])) * 600 > 50
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: 'ErrorEvent capture rate is elevated'
+          description: '>50 captured errors in 10m — check /admin/errors.'
+
+      - alert: SlowRequestsP95
+        expr: |
+          histogram_quantile(0.95, sum(rate(http_request_duration_ms_bucket[10m])) by (le)) > 3000
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: 'Request p95 latency > 3s'
+
+  - name: growth-agent.integrations
+    rules:
+      - alert: ExternalApiFailures
+        expr: |
+          sum(rate(external_api_failures_total[15m]))
+            / clamp_min(sum(rate(external_api_calls_total[15m])), 0.001) > 0.25
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: 'External API (YouTube/TikTok/Stripe) failure rate > 25%'
+
+      - alert: AiCallFailures
+        expr: |
+          sum(rate(ai_call_failures_total[15m]))
+            / clamp_min(sum(rate(ai_calls_total[15m])), 0.001) > 0.25
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: 'AI provider call failure rate > 25%'
+
+      - alert: AiCostBurnRate
+        # Sustained model spend — tune the USD/hour ceiling for your plan mix.
+        expr: sum(rate(ai_cost_usd_total[1h])) * 3600 > 25
+        for: 30m
+        labels: { severity: warning }
+        annotations:
+          summary: 'Estimated AI spend > $25/hour'
+          description: 'Consider a per-org kill switch or tighter usage limits.'
+
+  - name: growth-agent.jobs
+    rules:
+      - alert: JobFailuresSustained
+        expr: sum by (queue) (rate(jobs_failed_total[15m])) > 0.1
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: 'Queue {{ $labels.queue }} is failing jobs steadily'
+
+      - alert: CrawlerFailureSpike
+        expr: |
+          sum(rate(crawl_failures_total[30m]))
+            / clamp_min(sum(rate(crawls_total[30m])), 0.001) > 0.5
+        for: 30m
+        labels: { severity: warning }
+        annotations:
+          summary: 'More than half of crawls are failing'
+
+      - alert: UsageLimitRejectionsHigh
+        expr: sum(rate(usage_limit_rejections_total[15m])) * 900 > 100
+        for: 15m
+        labels: { severity: info }
+        annotations:
+          summary: 'Many usage-limit rejections'
+          description: '>100 429s in 15m — a customer may be mis-provisioned, or a plan limit is too low.'
+
+  - name: growth-agent.security
+    rules:
+      - alert: WebhookSignatureFailures
+        # Phase 31 — a sustained non-zero rate here means either a stale/wrong
+        # STRIPE_WEBHOOK_SECRET (every real delivery would then fail) or
+        # something probing the endpoint — either way, an operator should know.
+        expr: sum by (provider) (rate(webhook_signature_failures_total[15m])) > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: '{{ $labels.provider }} webhook signature verification is failing'
+          description: 'Check STRIPE_WEBHOOK_SECRET matches the endpoint configured in the Stripe Dashboard, or investigate a possible probe against /api/billing/webhook.'

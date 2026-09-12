@@ -1,0 +1,31 @@
+# Keep the build context small and reproducible.
+**/node_modules
+**/.next
+**/dist
+**/.turbo
+**/coverage
+**/playwright-report
+**/test-results
+**/.vitest
+
+.git
+.github
+.husky
+.vscode
+.idea
+
+# Never ship local env / secrets into an image.
+.env
+.env.*
+!.env.example
+
+# Local infra + docs are not needed at build time.
+docker-compose.yml
+*.md
+docs/
+"ChatGPT Image"*.png
+"Claude Code Master Project Instruction.pdf"
+
+# OS noise
+.DS_Store
+Thumbs.db

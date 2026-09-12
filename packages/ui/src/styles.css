@@ -1,0 +1,85 @@
+/* Design tokens for the Growth Agent UI. Imported once by the app's global CSS.
+   Light palette on :root; dark overrides gated so an explicit toggle wins both
+   ways and the system default still works. */
+
+:root {
+  --background: 0 0% 100%;
+  --foreground: 222 47% 11%;
+  --card: 0 0% 100%;
+  --card-foreground: 222 47% 11%;
+  --primary: 244 76% 58%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 210 40% 96%;
+  --secondary-foreground: 222 47% 11%;
+  --muted: 210 40% 96%;
+  /* 40% lightness (not the more common 45-47%) keeps this at ~6.1:1 against
+     --background/--card instead of ~4.7:1 — comfortably clear of the 4.5:1
+     WCAG AA minimum for normal text rather than right at its edge. */
+  --muted-foreground: 215 16% 40%;
+  --accent: 244 76% 96%;
+  --accent-foreground: 244 76% 32%;
+  --destructive: 0 72% 51%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 214 32% 91%;
+  --input: 214 32% 91%;
+  --ring: 244 76% 58%;
+  --radius: 0.6rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --background: 222 47% 8%;
+    --foreground: 210 40% 98%;
+    --card: 222 47% 10%;
+    --card-foreground: 210 40% 98%;
+    --primary: 244 76% 66%;
+    --primary-foreground: 222 47% 11%;
+    --secondary: 217 33% 17%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217 33% 17%;
+    --muted-foreground: 215 20% 65%;
+    --accent: 244 40% 22%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 63% 45%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 217 33% 20%;
+    --input: 217 33% 22%;
+    --ring: 244 76% 66%;
+  }
+}
+
+:root[data-theme='dark'] {
+  --background: 222 47% 8%;
+  --foreground: 210 40% 98%;
+  --card: 222 47% 10%;
+  --card-foreground: 210 40% 98%;
+  --primary: 244 76% 66%;
+  --primary-foreground: 222 47% 11%;
+  --secondary: 217 33% 17%;
+  --secondary-foreground: 210 40% 98%;
+  --muted: 217 33% 17%;
+  --muted-foreground: 215 20% 65%;
+  --accent: 244 40% 22%;
+  --accent-foreground: 210 40% 98%;
+  --destructive: 0 63% 45%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 217 33% 20%;
+  --input: 217 33% 22%;
+  --ring: 244 76% 66%;
+}
+
+/* Collapse every animation/transition to near-zero instead of `none`: this
+   keeps `animationend`/`transitionend` firing (just almost instantly), which
+   Radix's Presence primitive (Dialog/DropdownMenu exit unmounting) relies on
+   to know an exit animation finished — `animation: none` would suppress that
+   event and could leave content stuck mounted after close. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

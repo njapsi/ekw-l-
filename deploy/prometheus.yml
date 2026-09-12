@@ -1,0 +1,39 @@
+# Growth Agent — Prometheus scrape config.
+#   docker run -d --name prometheus -p 9091:9090 \
+#     -v $PWD/deploy/prometheus.yml:/etc/prometheus/prometheus.yml \
+#     -v $PWD/deploy/alerts.yml:/etc/prometheus/alerts.yml prom/prometheus
+#
+# Both targets are on the internal network; the web endpoint needs the bearer
+# token from METRICS_TOKEN (Phase 13). The registry is per-process and resets
+# on deploy — expect a sawtooth; durable numbers live in the DB / /admin.
+
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+rule_files:
+  - alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs: [{ targets: ['alertmanager:9093'] }]
+
+scrape_configs:
+  - job_name: growth-agent-web
+    metrics_path: /api/metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/metrics_token # = $METRICS_TOKEN
+    static_configs:
+      - targets: ['web:3000']
+        labels: { service: web }
+
+  - job_name: growth-agent-worker
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['worker:9090']
+        labels: { service: worker }
+
+  # Optional: postgres_exporter / redis_exporter if you run managed-service exporters.
+  # - job_name: postgres
+  #   static_configs: [{ targets: ['postgres-exporter:9187'] }]
