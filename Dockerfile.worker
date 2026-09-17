@@ -64,7 +64,9 @@ ARG PLAYWRIGHT_VERSION
 ENV NODE_ENV=production WORKER_HEALTH_PORT=9090 PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates wget \
+# openssl here too, for the same reason as Dockerfile.web's runner (this
+# stage doesn't inherit the build stage's own install — reproduced live).
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates wget openssl \
  && rm -rf /var/lib/apt/lists/* \
  # A real, standalone global pnpm binary — not corepack's shim. This image
  # (and the one-shot `migrate` service that reuses it) runs on the compose

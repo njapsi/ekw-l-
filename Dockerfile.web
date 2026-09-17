@@ -64,7 +64,13 @@ RUN pnpm db:generate \
 FROM node:${NODE_VERSION}-bookworm-slim AS runner
 ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 PORT=3000 HOSTNAME=0.0.0.0
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends wget \
+# openssl: Prisma's query engine re-detects the OpenSSL version at actual
+# runtime, not just at generate time — this runner is a separate, fresh
+# `FROM node:...` stage that doesn't inherit the build stage's own openssl
+# install, so it needs it too (reproduced live: /api/health reported the
+# client "generated for debian-openssl-3.0.x" but the running container
+# self-detected — wrongly, absent this fix — "debian-openssl-1.1.x").
+RUN apt-get update && apt-get install -y --no-install-recommends wget openssl \
  && rm -rf /var/lib/apt/lists/* \
  && addgroup --system --gid 1001 nodejs \
  && adduser  --system --uid 1001 nextjs
