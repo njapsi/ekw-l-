@@ -824,8 +824,57 @@ test:e2e` run with **61/88 tests passing** (every non-DB-dependent test,
   verified by type-checking + the DB-less e2e suite, not a live click
   -through — no Docker/WSL available. See `docs/ACCESSIBILITY-AUDIT.md`,
   ADR-0044.
-- **Staging deployment** ⚠️ (operator's "Phase 30", **runbook only — no
-  staging environment is actually operational**): this session has no cloud
+- **Staging deployment** ✅ (operator's "Phase 30" — the runbook-only ⚠️
+  state below was superseded in a later session: **a real staging
+  environment is now live and verified** at `https://staging.agentgrowth.tech`
+  on a Hostinger KVM VPS, Supabase Postgres, and Upstash Redis, all real
+  accounts the user provisioned; `/api/health` returns
+  `{"status":"ok","checks":[{"database":"ok"},{"redis":"ok"},{"worker":"ok"}...]}`
+  against the actual deployed containers). Getting there surfaced — and
+  fixed — real bugs no prior phase's `pnpm typecheck`/`pnpm build` gates had
+  ever caught, because this repo's Docker images had genuinely never been
+  built and run end-to-end before (every earlier phase's "web build ✅"
+  claim was `next build`/`tsc` only, never a real container): **(1)**
+  `Dockerfile.web`'s build stage inherited from `base` instead of `deps`,
+  missing pnpm's per-package `node_modules/.bin` symlinks (`prisma: not
+  found`); **(2)** the runner's "belt & suspenders" Prisma copy pointed at a
+  path that never existed under pnpm's isolated linker, and — after a
+  reverted false start that broke `@growth-agent/db`'s
+  `export * from '@prisma/client'` for every consumer, see ADR-0048 — at a
+  destination Prisma's runtime doesn't actually search either; the real
+  fix copies to `apps/web/.prisma/client`, the actual Next-standalone
+  convention, confirmed from Prisma's own runtime search-path listing;
+  **(3)** neither runner stage had the `openssl` CLI, so Prisma's own
+  version detection silently guessed the wrong engine target in each of
+  four different places before this was caught; **(4)** the `migrate`
+  service's `prisma migrate deploy` needs a second, separate binary (the
+  schema engine) that `generate` never fetches, now pre-warmed at build
+  time. Separately, **both** `docker-compose.staging.yml` and
+  `docker-compose.production.yml` had `internal: true` on the network
+  `web`/`worker`/`migrate` all share — which blocks *all* outbound traffic,
+  not just inbound exposure, directly contradicting this project's own
+  external-managed-Postgres/Redis architecture; removed from both files.
+  Also fixed live: two admin-only Prisma re-export/inference bugs
+  (`packages/services/src/observability/admin-lists.ts` now has explicit
+  return types on every list function — see ADR-0048's sibling commits),
+  a corepack-vs-offline-network conflict on the `internal`-only `migrate`
+  container (replaced with a plain global `npm install -g pnpm`), and two
+  real, previously-nonexistent `/terms` and `/privacy` pages (required by
+  TikTok's app-registration form, and by any real product regardless).
+  TikTok and Stripe were deliberately left unconfigured for this pass — the
+  app degrades correctly, confirmed live (TikTok "Connect" simply
+  unavailable; billing runs everyone on FREE with a "not configured"
+  banner, no error). Email runs in `console` mode (magic links print to
+  the container log rather than sending). All of this is now the *real*,
+  load-bearing runbook, not a rehearsal: `docs/STAGING.md`,
+  `docker-compose.staging.yml`, `.env.staging.example` (all from the
+  original pass below still describe the intended shape correctly; the
+  Docker/Prisma/network fixes above are what made following them actually
+  work). See ADR-0045, ADR-0048, and the commit history around
+  `Dockerfile.web`/`Dockerfile.worker`/`docker-compose.*.yml` for the full
+  blow-by-blow.
+- **Staging deployment, original pass** ⚠️ (superseded above; kept for the
+  design rationale it still documents correctly): this session had no cloud
   account, no domain, and no Google/TikTok/Stripe/email-provider
   credentials — confirmed no cloud CLI is installed and no such credentials
   exist in the environment — so nothing here could be deployed for real;
