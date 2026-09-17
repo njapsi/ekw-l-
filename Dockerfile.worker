@@ -41,7 +41,14 @@ RUN pnpm db:generate && pnpm --filter @growth-agent/worker build
 FROM node:${NODE_VERSION}-bookworm-slim AS runner
 ARG PLAYWRIGHT_VERSION
 ENV NODE_ENV=production WORKER_HEALTH_PORT=9090 \
-    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright PNPM_HOME=/pnpm PATH=/pnpm:$PATH
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright PNPM_HOME=/pnpm PATH=/pnpm:$PATH \
+    # This image (and the one-shot `migrate` service that reuses it) runs on
+    # the compose file's `internal` network with no internet access, by
+    # design. Corepack otherwise re-verifies its pinned package manager
+    # against the registry on every invocation even when already prepared
+    # below, which fails hard with no network — force it to trust the local
+    # cache instead (reproduced running `migrate` for real).
+    COREPACK_ENABLE_NETWORK=0
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates wget \
