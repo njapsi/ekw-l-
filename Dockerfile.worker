@@ -41,14 +41,7 @@ RUN pnpm db:generate && pnpm --filter @growth-agent/worker build
 FROM node:${NODE_VERSION}-bookworm-slim AS runner
 ARG PLAYWRIGHT_VERSION
 ENV NODE_ENV=production WORKER_HEALTH_PORT=9090 \
-    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright PNPM_HOME=/pnpm PATH=/pnpm:$PATH \
-    # This image (and the one-shot `migrate` service that reuses it) runs on
-    # the compose file's `internal` network with no internet access, by
-    # design. Corepack otherwise re-verifies its pinned package manager
-    # against the registry on every invocation even when already prepared
-    # below, which fails hard with no network — force it to trust the local
-    # cache instead (reproduced running `migrate` for real).
-    COREPACK_ENABLE_NETWORK=0
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright PNPM_HOME=/pnpm PATH=/pnpm:$PATH
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates wget \
@@ -57,6 +50,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
  && addgroup --system --gid 1001 nodejs \
  && adduser  --system --uid 1001 worker \
  && mkdir -p /ms-playwright && chown worker:nodejs /ms-playwright
+
+# Set only AFTER corepack prepare (which needs the registry at build time).
+# This image (and the one-shot `migrate` service that reuses it) runs on
+# the compose file's `internal` network with no internet access at runtime,
+# by design. Corepack otherwise re-verifies its pinned package manager
+# against the registry on every invocation even when already prepared
+# above, which fails hard with no network (reproduced running `migrate`)
+# — force it to trust the local cache instead.
+ENV COREPACK_ENABLE_NETWORK=0
 
 # Whole workspace + resolved node_modules (workspace pkgs are consumed as TS
 # source, so the worker needs them present, not compiled).
