@@ -15,7 +15,16 @@ ARG PLAYWRIGHT_VERSION=1.49.1
 
 FROM node:${NODE_VERSION}-bookworm-slim AS base
 ENV PNPM_HOME=/pnpm PATH=/pnpm:$PATH CI=true NODE_ENV=production
-RUN corepack enable && corepack prepare pnpm@10.14.0 --activate
+# bookworm-slim ships OpenSSL 3.0.x but not the `openssl` CLI Prisma shells
+# out to for version detection; without it, `prisma generate`/`migrate`
+# print "failed to detect the libssl/openssl version... Defaulting to
+# openssl-1.1.x" and silently target the WRONG engine binary (reproduced:
+# this mismatch, not network timing, was the real cause of migrate's
+# "getaddrinfo EAI_AGAIN binaries.prisma.sh" failure — the fetch target
+# itself was wrong). Prisma's own warning names this exact fix.
+RUN apt-get update && apt-get install -y --no-install-recommends openssl \
+ && rm -rf /var/lib/apt/lists/* \
+ && corepack enable && corepack prepare pnpm@10.14.0 --activate
 WORKDIR /app
 
 # --- deps: install once, cached on the lockfile -----------------------

@@ -15,7 +15,13 @@ ARG NODE_VERSION=20.11.0
 # --- base -------------------------------------------------------------------
 FROM node:${NODE_VERSION}-bookworm-slim AS base
 ENV PNPM_HOME=/pnpm PATH=/pnpm:$PATH CI=true
-RUN corepack enable && corepack prepare pnpm@10.14.0 --activate
+# bookworm-slim ships OpenSSL 3.0.x but not the `openssl` CLI Prisma shells
+# out to for version detection; without it, `prisma generate` silently
+# targets the wrong engine binary (see Dockerfile.worker for the full
+# story — reproduced building that image's migrate step).
+RUN apt-get update && apt-get install -y --no-install-recommends openssl \
+ && rm -rf /var/lib/apt/lists/* \
+ && corepack enable && corepack prepare pnpm@10.14.0 --activate
 WORKDIR /app
 
 # --- deps: install once, cached on the lockfile --------------------------
