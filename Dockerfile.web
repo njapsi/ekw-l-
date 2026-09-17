@@ -33,9 +33,12 @@ RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
     pnpm install --frozen-lockfile --prefer-offline
 
 # --- build: generate Prisma client + Next standalone --------------------
-FROM base AS build
+# FROM deps (not base) — pnpm's default linker places each workspace
+# package's own binaries (e.g. `prisma`, used from packages/db) in that
+# package's own node_modules/.bin, not just the root one; inheriting the
+# whole deps stage carries those over, matching Dockerfile.worker's pattern.
+FROM deps AS build
 ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 NEXT_OUTPUT_STANDALONE=1
-COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN pnpm db:generate \
  && pnpm --filter @growth-agent/web build
