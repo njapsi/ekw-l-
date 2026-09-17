@@ -113,8 +113,15 @@ services:
 
 networks:
   edge:
+  # NOT internal:true — `web`/`worker`/`migrate` all need real outbound
+  # internet to reach the *external* managed Postgres/Redis this project's
+  # architecture requires (Supabase/Upstash in staging, their production
+  # equivalents in prod) — docker's `internal:true` blocks ALL egress, not
+  # just inbound exposure, which was never actually exercised before this
+  # deploy (`migrate` failed outright: "Can't reach database server").
+  # Nothing becomes publicly reachable by removing it — that's governed
+  # separately by `expose:`/`ports:` below, unchanged.
   internal:
-    internal: true
 
 volumes:
   caddy_data:

@@ -127,8 +127,13 @@ services:
 
 networks:
   edge:
+  # NOT internal:true — see docker-compose.staging.yml for the full
+  # explanation (reproduced deploying staging): this project's architecture
+  # requires real outbound internet from web/worker/migrate to reach the
+  # external managed Postgres/Redis, which docker's internal:true blocks
+  # entirely, not just inbound exposure (already separately governed by
+  # expose:/ports: below, unchanged by this).
   internal:
-    internal: true
 
 volumes:
   caddy_data:
