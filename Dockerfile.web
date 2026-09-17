@@ -41,7 +41,18 @@ FROM deps AS build
 ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 NEXT_OUTPUT_STANDALONE=1
 COPY . .
 RUN pnpm db:generate \
- && pnpm --filter @growth-agent/web build
+ && pnpm --filter @growth-agent/web build \
+ # pnpm's isolated linker nests the generated client + native query engine
+ # deep inside a version-hashed pnpm-store path (co-located with @prisma/client
+ # itself, which is how it stays resolvable), which Next's standalone tracing
+ # does not follow. Relocate a copy to the stable path the runner stage below
+ # already expects, rather than hardcoding that hash into a COPY instruction
+ # (fragile — it changes with any dependency bump) or customizing Prisma's own
+ # `output` (breaks `export * from '@prisma/client'` model-type re-exports for
+ # every OTHER workspace package that imports types from @growth-agent/db —
+ # reproduced building this image, see docs/DECISIONS.md).
+ && mkdir -p node_modules/.prisma \
+ && cp -r "$(find node_modules/.pnpm -type d -path '*/node_modules/.prisma/client' | head -1)" node_modules/.prisma/
 
 # --- runner: minimal, non-root ----------------------------------------
 FROM node:${NODE_VERSION}-bookworm-slim AS runner

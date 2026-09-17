@@ -6,6 +6,56 @@ reversal gets a new ADR that supersedes the old one.
 
 ---
 
+## ADR-0048 — Relocate the generated Prisma client in the web Docker build via a shell step, not a customized `output` path
+
+**Context.** Building the staging web image for the first time ever (this
+repo's Docker images had never actually been built end-to-end before —
+Docker was unavailable in every prior review environment) surfaced a real
+gap: `Dockerfile.web`'s runner stage copies `/app/node_modules/.prisma` as a
+"belt & suspenders" measure for when Next's standalone file-tracing misses
+Prisma's native query engine (a known, common gap for Prisma + Next.js
+standalone). That path has never actually existed — pnpm's default
+(non-hoisted) linker generates the Prisma client co-located inside
+`@prisma/client`'s own version-hashed pnpm-store folder
+(`node_modules/.pnpm/@prisma+client@<hash>/node_modules/.prisma/client`),
+not at a flat root path.
+
+The first fix attempted was Prisma's own documented remedy for this exact
+Next.js-standalone-in-a-monorepo scenario: setting the schema generator's
+`output` to a stable path (`../../../node_modules/.prisma/client`). It
+worked for `packages/db` itself and appeared to work in an initial local
+check, but rebuilding the **worker** image (previously untested this deep)
+revealed the real cost: with a customized `output`, Prisma no longer
+patches `@prisma/client`'s own `index.js`/`index.d.ts` to point at the
+generated client, so `@growth-agent/db`'s `export * from '@prisma/client'`
+stopped re-exporting any model types — breaking type imports in every
+*other* workspace package that imports a Prisma model type through
+`@growth-agent/db` (`packages/services`'s tiktok/youtube/usage modules, at
+minimum). This was caught only because the worker image had never
+previously built far enough to exercise it, not by any test suite.
+
+**Decision.** Revert the schema change; keep Prisma's default (co-located)
+output entirely alone, so `export * from '@prisma/client'` keeps working
+everywhere unmodified. Fix the actual runner-stage gap instead in
+`Dockerfile.web`'s **build** stage, with a shell step appended to the
+existing `RUN pnpm db:generate && pnpm --filter @growth-agent/web build`:
+locate the real (hash-suffixed) generated client with `find` and copy it to
+the stable `node_modules/.prisma` path the runner stage already expects.
+This is resilient to the pnpm-store hash changing on any dependency bump
+(unlike hardcoding that hash into a cross-stage `COPY --from=build`
+instruction, which Docker can't glob) and touches nothing outside this one
+Dockerfile.
+
+**Consequences.** No schema change, no risk to any other package's type
+exports. The fix is Docker-build-local and disappears entirely if this
+project ever moves off pnpm's isolated linker or off Next's standalone
+output. Verified by building both images successfully in the actual
+Linux/Docker environment (not just `pnpm typecheck`, which never caught
+either the missing path or the broken re-export — both only reproduced
+building a real, fresh Linux container).
+
+---
+
 ## ADR-0047 — Typography brought in line with a visual reference (Hanken Grotesk / IBM Plex Mono) via self-hosted `next/font`, not a Google Fonts `<link>`
 
 **Context.** A visual reference mockup for the product's screens ("Growth
