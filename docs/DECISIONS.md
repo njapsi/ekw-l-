@@ -40,19 +40,38 @@ everywhere unmodified. Fix the actual runner-stage gap instead in
 `Dockerfile.web`'s **build** stage, with a shell step appended to the
 existing `RUN pnpm db:generate && pnpm --filter @growth-agent/web build`:
 locate the real (hash-suffixed) generated client with `find` and copy it to
-the stable `node_modules/.prisma` path the runner stage already expects.
-This is resilient to the pnpm-store hash changing on any dependency bump
-(unlike hardcoding that hash into a cross-stage `COPY --from=build`
-instruction, which Docker can't glob) and touches nothing outside this one
-Dockerfile.
+a stable, predictable path — resilient to the pnpm-store hash changing on
+any dependency bump (unlike hardcoding that hash into a cross-stage
+`COPY --from=build` instruction, which Docker can't glob) and touching
+nothing outside this one Dockerfile.
+
+That stable path is **not** `node_modules/.prisma` at the standalone root,
+despite that being the runner's original (also never-worked) guess: a live
+`/api/health` failure after deploying enumerated Prisma's actual runtime
+search locations for a Next.js standalone build, and the one that's a
+real Next.js-standalone convention is `<app-dir>/.prisma/client` — a
+hidden folder *sibling to `server.js` itself*
+(`apps/web/.prisma/client`), not anywhere under the standalone root's
+`node_modules`. The runner's copy destination was corrected to match.
+Two further sibling issues surfaced in the same live-deploy pass, both
+fixed alongside this one: OpenSSL version detection needs the `openssl`
+CLI installed in *every* stage that touches Prisma, including both
+runner stages (each a fresh `FROM node:...`, inheriting nothing from the
+build stage) — without it, Prisma silently guesses the wrong target and
+the mismatch only surfaces as this same "engine not found" class of error;
+and the schema engine (needed only by `migrate deploy`, never invoked
+during a normal build) has to be pre-fetched explicitly since it's a
+separate binary from the query engine `generate` already fetches.
 
 **Consequences.** No schema change, no risk to any other package's type
 exports. The fix is Docker-build-local and disappears entirely if this
 project ever moves off pnpm's isolated linker or off Next's standalone
-output. Verified by building both images successfully in the actual
-Linux/Docker environment (not just `pnpm typecheck`, which never caught
-either the missing path or the broken re-export — both only reproduced
-building a real, fresh Linux container).
+output. None of these four issues (the missing path, the broken
+re-export, the OpenSSL mis-detection, the wrong runtime search location)
+were ever caught by `pnpm typecheck`/`pnpm build` — all four only ever
+reproduced building and running a real, fresh Linux container, which is
+why this phase's verification is a live `/api/health` check against the
+actual deployed staging container, not just the usual gate commands.
 
 ---
 

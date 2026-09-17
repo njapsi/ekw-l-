@@ -80,8 +80,13 @@ COPY --from=build --chown=nextjs:nodejs /app/apps/web/.next/standalone/ ./
 COPY --from=build --chown=nextjs:nodejs /app/apps/web/.next/static       ./apps/web/.next/static
 # No apps/web/public directory exists in this app today — nothing to copy;
 # add this line back if/when static assets (a favicon, etc.) are added.
-# Prisma query engine — belt & suspenders in case tracing missed the .node.
-COPY --from=build --chown=nextjs:nodejs /app/node_modules/.prisma        ./node_modules/.prisma
+# Prisma's generated client, for when standalone tracing misses the native
+# query engine (it does, here — confirmed live). This exact destination,
+# `<app>/.prisma/client` sibling to server.js, is one of the specific
+# locations Prisma's client actually searches at runtime in a Next.js
+# standalone deployment (confirmed from its own runtime error listing);
+# `node_modules/.prisma` at the standalone root — tried first — is not.
+COPY --from=build --chown=nextjs:nodejs /app/node_modules/.prisma/client ./apps/web/.prisma/client
 
 USER nextjs
 EXPOSE 3000
