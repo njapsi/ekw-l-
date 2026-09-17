@@ -55,7 +55,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends wget \
 # Next's standalone output: server.js + traced node_modules + workspace pkgs.
 COPY --from=build --chown=nextjs:nodejs /app/apps/web/.next/standalone/ ./
 COPY --from=build --chown=nextjs:nodejs /app/apps/web/.next/static       ./apps/web/.next/static
-COPY --from=build --chown=nextjs:nodejs /app/apps/web/public             ./apps/web/public
+# No apps/web/public directory exists in this app today — nothing to copy;
+# add this line back if/when static assets (a favicon, etc.) are added.
 # Prisma query engine — belt & suspenders in case tracing missed the .node.
 COPY --from=build --chown=nextjs:nodejs /app/node_modules/.prisma        ./node_modules/.prisma
 

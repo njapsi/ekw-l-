@@ -7,6 +7,14 @@
 
 generator client {
   provider = "prisma-client-js"
+  // Pinned to a stable, predictable path (Prisma's own documented fix for
+  // Next.js standalone output in a pnpm monorepo — see
+  // prisma.io/docs/orm/more/help-and-troubleshooting/nextjs-help): without
+  // this, pnpm's isolated linker nests the generated client + native query
+  // engine deep inside a version-hashed virtual-store path, which Next's
+  // standalone file-tracing does not follow, leaving the web image with no
+  // Prisma client at runtime (reproduced building the staging image).
+  output   = "../../../node_modules/.prisma/client"
 }
 
 datasource db {
