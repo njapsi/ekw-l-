@@ -35,7 +35,19 @@ RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
 # --- build: sources + generated Prisma client + a typecheck ----------
 FROM deps AS build
 COPY . .
-RUN pnpm db:generate && pnpm --filter @growth-agent/worker build
+RUN pnpm db:generate && pnpm --filter @growth-agent/worker build \
+ # `prisma generate` above only fetches the *query* engine (bundled into the
+ # generated client); the *schema* engine is a separate binary, needed only
+ # by `prisma migrate deploy`, which never runs at build time (migrations
+ # are a deliberate release step, not baked into the image). Left
+ # unfetched, it lazily downloads on first real `migrate deploy` — which
+ # runs as the one-shot `migrate` compose service on the `internal: true`
+ # network with no internet, and fails outright (reproduced running it for
+ # real). Force the download now, while this stage still has internet;
+ # the command itself is expected to fail (no real database is reachable
+ # at build time) — only the engine-fetch side effect matters.
+ && (DATABASE_URL="postgresql://u:p@127.0.0.1:5432/d" DIRECT_URL="postgresql://u:p@127.0.0.1:5432/d" \
+      pnpm --filter @growth-agent/db exec prisma migrate status || true)
 
 # --- runner ---------------------------------------------------------
 FROM node:${NODE_VERSION}-bookworm-slim AS runner
