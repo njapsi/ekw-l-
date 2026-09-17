@@ -40,7 +40,21 @@ export function maskId(id: string | null | undefined): string | null {
 
 // --- Users -----------------------------------------------------------
 
-export async function listUsers(db: Db = prisma, opts: { q?: string; page?: number } = {}) {
+export interface UserRow {
+  id: string;
+  email: string;
+  name: string | null;
+  emailVerified: boolean;
+  staffLevel: string | null;
+  memberships: number;
+  deleted: boolean;
+  createdAt: string;
+}
+
+export async function listUsers(
+  db: Db = prisma,
+  opts: { q?: string; page?: number } = {},
+): Promise<Page<UserRow>> {
   const { skip, take, page, pageSize } = paging(opts);
   const where: Prisma.UserWhereInput = opts.q
     ? {
@@ -88,7 +102,21 @@ export async function listUsers(db: Db = prisma, opts: { q?: string; page?: numb
 
 // --- Organizations -------------------------------------------------
 
-export async function listOrganizations(db: Db = prisma, opts: { q?: string; page?: number } = {}) {
+export interface OrganizationRow {
+  id: string;
+  name: string;
+  slug: string;
+  tier: string;
+  subscriptionStatus: string | null;
+  members: number;
+  deleted: boolean;
+  createdAt: string;
+}
+
+export async function listOrganizations(
+  db: Db = prisma,
+  opts: { q?: string; page?: number } = {},
+): Promise<Page<OrganizationRow>> {
   const { skip, take, page, pageSize } = paging(opts);
   const where: Prisma.OrganizationWhereInput = opts.q
     ? {
@@ -133,7 +161,53 @@ export async function listOrganizations(db: Db = prisma, opts: { q?: string; pag
   );
 }
 
-export async function getOrganizationDetail(db: Db, orgId: string) {
+export interface OrganizationDetail {
+  id: string;
+  name: string;
+  slug: string;
+  deleted: boolean;
+  createdAt: string;
+  subscription: {
+    tier: string;
+    status: string;
+    interval: string;
+    seats: number;
+    currentPeriodEnd: string | null;
+    cancelAtPeriodEnd: boolean;
+    trialEndsAt: string | null;
+    stripeCustomer: string | null;
+    stripeSubscription: string | null;
+  } | null;
+  members: Array<{
+    userId: string;
+    email: string;
+    name: string | null;
+    role: string;
+    status: string;
+    joinedAt: string;
+  }>;
+  usage: Array<{ meter: string; used: number; limit: number | null }>;
+  recentAgentRuns: Array<{
+    id: string;
+    agent: string;
+    status: string;
+    costUsd: number;
+    createdAt: string;
+  }>;
+  recentCrawls: Array<{
+    id: string;
+    status: string;
+    pagesCrawled: number;
+    issuesFound: number;
+    createdAt: string;
+  }>;
+  recentAudit: Array<{ id: string; action: string; actorType: string; createdAt: string }>;
+}
+
+export async function getOrganizationDetail(
+  db: Db,
+  orgId: string,
+): Promise<OrganizationDetail | null> {
   const org = await db.organization.findUnique({
     where: { id: orgId },
     select: {
@@ -239,10 +313,24 @@ export async function getOrganizationDetail(db: Db, orgId: string) {
 
 // --- Subscriptions -----------------------------------------------
 
+export interface SubscriptionRow {
+  id: string;
+  org: { id: string; name: string; slug: string };
+  tier: string;
+  status: string;
+  interval: string;
+  seats: number;
+  currentPeriodEnd: string | null;
+  cancelAtPeriodEnd: boolean;
+  trialEndsAt: string | null;
+  stripeCustomer: string | null;
+  stripeSubscription: string | null;
+}
+
 export async function listSubscriptions(
   db: Db = prisma,
   opts: { page?: number; tier?: string; status?: string } = {},
-) {
+): Promise<Page<SubscriptionRow>> {
   const { skip, take, page, pageSize } = paging(opts);
   const where: Prisma.SubscriptionWhereInput = {};
   if (opts.tier) where.tier = opts.tier as Prisma.SubscriptionWhereInput['tier'];
@@ -291,10 +379,25 @@ export async function listSubscriptions(
 
 // --- Agent runs -------------------------------------------------
 
+export interface AgentRunRow {
+  id: string;
+  organizationId: string;
+  agent: string;
+  status: string;
+  trigger: string | null;
+  model: string | null;
+  provider: string | null;
+  promptTokens: number;
+  completionTokens: number;
+  costUsd: number;
+  durationMs: number | null;
+  createdAt: string;
+}
+
 export async function listAgentRuns(
   db: Db = prisma,
   opts: { page?: number; status?: string; agent?: string; organizationId?: string } = {},
-) {
+): Promise<Page<AgentRunRow>> {
   const { skip, take, page, pageSize } = paging(opts);
   const where: Prisma.AgentRunWhereInput = {};
   if (opts.status) where.status = opts.status as Prisma.AgentRunWhereInput['status'];
@@ -348,7 +451,25 @@ export async function listAgentRuns(
 
 // --- Crawler jobs ---------------------------------------------
 
-export async function listCrawls(db: Db = prisma, opts: { page?: number; status?: string } = {}) {
+export interface CrawlRow {
+  id: string;
+  organizationId: string;
+  hostname: string;
+  status: string;
+  renderMode: string;
+  pagesCrawled: number;
+  pagesQueued: number;
+  issuesFound: number;
+  error: string | null;
+  blockedReason: string | null;
+  durationMs: number | null;
+  createdAt: string;
+}
+
+export async function listCrawls(
+  db: Db = prisma,
+  opts: { page?: number; status?: string } = {},
+): Promise<Page<CrawlRow>> {
   const { skip, take, page, pageSize } = paging(opts);
   const where: Prisma.CrawlWhereInput = {};
   if (opts.status) where.status = opts.status as Prisma.CrawlWhereInput['status'];
@@ -400,10 +521,29 @@ export async function listCrawls(db: Db = prisma, opts: { page?: number; status?
 
 // --- API integrations --------------------------------------
 
+export interface OAuthConnectionRow {
+  id: string;
+  organizationId: string;
+  provider: string;
+  displayName: string | null;
+  scopeCount: number;
+  status: string;
+  expiresAt: string | null;
+  lastRefreshedAt: string | null;
+  lastError: string | null;
+  health: {
+    ok: boolean;
+    detail: string | null;
+    quotaUnitsUsedToday: number | null;
+    lastCheckAt: string;
+  } | null;
+  createdAt: string;
+}
+
 export async function listOAuthConnections(
   db: Db = prisma,
   opts: { page?: number; provider?: string; status?: string } = {},
-) {
+): Promise<Page<OAuthConnectionRow>> {
   const { skip, take, page, pageSize } = paging(opts);
   const where: Prisma.OAuthConnectionWhereInput = {};
   if (opts.provider) where.provider = opts.provider as Prisma.OAuthConnectionWhereInput['provider'];
@@ -463,10 +603,22 @@ export async function listOAuthConnections(
 
 // --- Audit logs ------------------------------------------
 
+export interface AuditLogRow {
+  id: string;
+  action: string;
+  actorType: string;
+  actorEmail: string | null;
+  orgSlug: string | null;
+  targetType: string | null;
+  targetId: string | null;
+  ip: string | null;
+  createdAt: string;
+}
+
 export async function listAuditLogs(
   db: Db = prisma,
   opts: { page?: number; action?: string; organizationId?: string; actorId?: string } = {},
-) {
+): Promise<Page<AuditLogRow>> {
   const { skip, take, page, pageSize } = paging(opts);
   const where: Prisma.AuditLogWhereInput = {};
   if (opts.action) where.action = { contains: opts.action, mode: 'insensitive' };
