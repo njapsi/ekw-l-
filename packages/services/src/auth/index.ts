@@ -19,3 +19,5 @@ export const signOut: NextAuthResult['signOut'] = result.signOut;
 export { edgeAuthConfig } from './config.edge.js';
 export type { AppSessionUser, SessionOrg } from './session.js';
 export { roleForOrg } from './callbacks.js';
+export { hashPassword } from './password.js';
+export { EmailNotVerifiedError } from './providers.js';

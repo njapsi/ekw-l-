@@ -28,11 +28,14 @@ recommendations**. Not a demo, prototype, or toy.
   implemented** (ADR-0035). `pgvector` for semantic memory (planned).
 - **Auth:** Auth.js (NextAuth v5) + Prisma adapter, **JWT sessions** (ADR-0011,
   so edge middleware can verify without a DB). Magic-link (delivery via
-  `EMAIL_TRANSPORT` = `resend` | `smtp` | `console`) + Google + a dev-only
-  credentials provider (`AUTH_DEV_LOGIN`). A prod deploy must have ≥1 real
-  sign-in path or boot fails (`config/env.ts`). RBAC/tenancy are ours:
-  `authorize()` policy table + `withOrgScope`/`requireMembership` + `sessionVersion`
-  revocation.
+  `EMAIL_TRANSPORT` = `resend` | `smtp` | `console`) + **email+password**
+  (`password` provider, `User.passwordHash`, salted scrypt via `node:crypto`
+  — no bcrypt/argon2 dependency; signup verification and password reset both
+  reuse the magic-link `VerificationToken` mechanism rather than a parallel
+  one, ADR-0049) + Google + a dev-only credentials provider (`AUTH_DEV_LOGIN`).
+  A prod deploy must have ≥1 real sign-in path or boot fails (`config/env.ts`).
+  RBAC/tenancy are ours: `authorize()` policy table + `withOrgScope`/
+  `requireMembership` + `sessionVersion` revocation.
 - **Jobs + cache:** BullMQ on Redis; Redis also for cache, rate limits,
   idempotency, crawl frontier.
 - **Object storage:** _planned, not implemented_ — S3-compatible with presigned
@@ -948,6 +951,32 @@ test:e2e` run with **61/88 tests passing** (every non-DB-dependent test,
   `/api/metrics` immediately after). Gates green: format/lint/typecheck
   14/14, `packages/services` 681 tests (unchanged), web build. See
   `docs/FINAL-SECURITY-REPORT.md`, ADR-0046.
+- **Email+password auth** ✅ (added alongside staging, not a numbered phase):
+  real signup (name/email/password/confirm) and password login added on top
+  of the existing magic-link-only auth, without touching how magic-link,
+  Google, or dev-login work. `User.passwordHash` (new, nullable, additive
+  migration `20260920120000_password_auth`); `packages/services/src/auth/
+  password.ts` hashes with salted scrypt via `node:crypto` — no bcrypt/
+  argon2 dependency, matching `crypto/tokens.ts`'s existing hand-rolled-
+  crypto convention. New `password` Credentials provider rate-limits every
+  attempt (10/hour/address) and runs a real scrypt computation even for a
+  nonexistent email so timing can't leak account existence; a correct
+  password against an unverified account surfaces a distinct
+  `EmailNotVerifiedError` rather than a generic failure. Both new flows
+  (post-signup verification, password reset) reuse the existing magic-link
+  `VerificationToken` mechanism — `signIn('nodemailer', { email, callbackUrl
+})` pointed at `/app` or the new `/app/set-password` page — rather than a
+  parallel token system, so they inherit the existing 5/hour rate limit for
+  free. Every signup/reset response is identical regardless of whether the
+  email exists (no enumeration oracle). New `/forgot-password` and
+  `/app/set-password` pages; `login`/`signup` pages rebuilt on new
+  `LoginForm`/`SignupForm` components (password primary, a Magic Link tab
+  alongside, Google/dev-login unchanged). See ADR-0049. Gates green:
+  lint/typecheck 14/14, `packages/services` 686 tests (+5, `password.test.ts`).
+  Verified live end-to-end against the real staging deployment (signup →
+  verification email → click → signed in → log out → password login →
+  forgot password → reset → login with the new password) — see
+  `docs/STAGING.md`.
 - **Still outstanding:** roadmap "Phase 3" (auth & tenancy hardening — **Postgres
   RLS (ADR-0035)**, the
   full edge/IP rate-limit layer + aggregate magic-link cap, a strict nonce-based

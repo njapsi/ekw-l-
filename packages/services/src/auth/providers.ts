@@ -1,13 +1,34 @@
 import { prisma } from '@growth-agent/db';
 import { createLogger } from '@growth-agent/observability';
+import { CredentialsSignin } from 'next-auth';
 import type { Provider } from 'next-auth/providers';
 import Credentials from 'next-auth/providers/credentials';
 import Google from 'next-auth/providers/google';
 import Nodemailer from 'next-auth/providers/nodemailer';
+import { checkRateLimit } from '../security/rate-limit.js';
+import { verifyAgainstDummy, verifyPassword } from './password.js';
 
 const log = createLogger('auth');
 
 const MAGIC_LINK_MAX_AGE = 15 * 60; // seconds
+
+/** Password-login attempts per email address per hour — separate from, and
+ * more generous than, the magic-link send limit (mistyped passwords are a
+ * normal retry pattern the magic-link flow doesn't have). */
+const PASSWORD_LOGIN_LIMIT = 10;
+
+/**
+ * Thrown by the `password` provider's `authorize()` when the credentials are
+ * correct but the account's email hasn't been verified yet (see the signup
+ * flow in apps/web/src/server/auth-actions.ts). NextAuth v5's supported way
+ * to surface a *specific* Credentials error to the client without leaking it
+ * as a generic "invalid credentials" — the `code` is safe to expose (it says
+ * nothing about whether an email exists on its own, only reachable once the
+ * password already matched).
+ */
+export class EmailNotVerifiedError extends CredentialsSignin {
+  override code = 'email-not-verified';
+}
 
 type SendArgs = { identifier: string; url: string };
 
@@ -62,8 +83,12 @@ async function sendViaResend({ identifier, url }: SendArgs): Promise<void> {
  *   - `resend`  — Resend HTTP API (`RESEND_API_KEY`); the zero-infra default.
  *   - `smtp`    — Nodemailer against `EMAIL_SERVER`.
  *   - `console` — dev only: the link is logged, never sent.
- * Google is added when configured. A dev-only credentials provider is available
- * strictly for local + e2e use (double-gated: `AUTH_DEV_LOGIN==='true'` AND
+ * Google is added when configured. A real email+password provider (`id:
+ * 'password'`) is always present alongside magic-link — signup/reset both
+ * work by sending a magic link (see auth-actions.ts), so password accounts
+ * share the same verification/reset infrastructure rather than a parallel
+ * one. A dev-only credentials provider is available strictly for local +
+ * e2e use (double-gated: `AUTH_DEV_LOGIN==='true'` AND
  * `NODE_ENV!=='production'`).
  */
 export function buildProviders(): Provider[] {
@@ -97,6 +122,46 @@ export function buildProviders(): Provider[] {
       server: process.env.EMAIL_SERVER ?? 'smtp://localhost:1025',
       maxAge: MAGIC_LINK_MAX_AGE,
       ...overrides,
+    }),
+  );
+
+  providers.push(
+    Credentials({
+      id: 'password',
+      name: 'Password',
+      credentials: {
+        email: { label: 'Email', type: 'email' },
+        password: { label: 'Password', type: 'password' },
+      },
+      async authorize(raw) {
+        const email = typeof raw?.email === 'string' ? raw.email.toLowerCase().trim() : '';
+        const password = typeof raw?.password === 'string' ? raw.password : '';
+        if (!email || !password) return null;
+
+        // Rate-limit every attempt (not just failures) so brute-forcing a
+        // password is throttled the same way magic-link sends already are.
+        const rl = await checkRateLimit({
+          key: `password-login:${email}`,
+          limit: PASSWORD_LOGIN_LIMIT,
+          windowSec: 3600,
+        });
+        if (!rl.ok) {
+          log.warn({ email }, 'password login rate-limited');
+          return null;
+        }
+
+        const user = await prisma.user.findUnique({ where: { email } });
+        if (!user || user.deletedAt || !user.passwordHash) {
+          // Run a real scrypt computation even though there's nothing to
+          // check against, so this path doesn't respond measurably faster
+          // than a wrong-password one (which would leak account existence).
+          verifyAgainstDummy(password);
+          return null;
+        }
+        if (!verifyPassword(password, user.passwordHash)) return null;
+        if (!user.emailVerified) throw new EmailNotVerifiedError();
+        return { id: user.id, email: user.email, name: user.name, image: user.image };
+      },
     }),
   );
 

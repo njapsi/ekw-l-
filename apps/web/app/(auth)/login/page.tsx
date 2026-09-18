@@ -1,7 +1,7 @@
 import { Suspense } from 'react';
 import type { Metadata } from 'next';
 import Link from 'next/link';
-import { AuthForm } from '@/components/auth/auth-form';
+import { LoginForm } from '@/components/auth/login-form';
 
 export const metadata: Metadata = { title: 'Log in' };
 
@@ -13,7 +13,7 @@ export default function LoginPage() {
   return (
     <div className="space-y-6">
       <Suspense fallback={null}>
-        <AuthForm mode="login" devLogin={devLogin} google={google} />
+        <LoginForm devLogin={devLogin} google={google} />
       </Suspense>
       <p className="text-muted-foreground text-center text-sm">
         New here?{' '}

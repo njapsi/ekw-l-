@@ -6,6 +6,78 @@ reversal gets a new ADR that supersedes the old one.
 
 ---
 
+## ADR-0049 — Email+password auth, added alongside magic-link, reusing its verification-token mechanism
+
+**Context.** The app shipped with passwordless-only auth: a magic-link
+(Nodemailer/Resend) provider, Google OAuth, and a dev-only credentials
+provider with no password check at all (`packages/services/src/auth/
+providers.ts`). Asked for a real signup-with-password flow (name/email/
+password/confirm, email verification before the account works, password
+login, self-service password reset), while keeping every existing sign-in
+path working unchanged.
+
+**Decision.**
+1. **No parallel token system.** Every "send a secure, single-use, expiring,
+   verification link" requirement (post-signup verification, password
+   reset) is already built — Auth.js's own email-provider callback marks
+   `emailVerified` and establishes a session when a `VerificationToken` is
+   redeemed. Both new flows call the same server-side `signIn('nodemailer',
+   { email, callbackUrl })` the existing magic-link login already uses, just
+   pointed at a different `callbackUrl` (`/app` for verification, `/app/
+   set-password` for reset — landing the now-authenticated user on a page to
+   choose a new password). This means no new database table, and the
+   existing 5/hour/address magic-link rate limit
+   (`packages/services/src/auth/config.ts`) covers both new flows for free.
+2. **Password hashing via Node's built-in `crypto.scrypt`, not a new
+   dependency.** No `bcrypt`/`argon2`/scrypt-package existed in the repo.
+   `packages/services/src/auth/password.ts` hand-rolls salted scrypt +
+   `timingSafeEqual`, matching `crypto/tokens.ts`'s existing convention of
+   hand-rolling crypto via `node:crypto` for exactly this class of need
+   (AES-256-GCM token envelopes) rather than adding a package.
+3. **A new `password` Credentials provider**, distinct from the existing
+   dev-only `dev-credentials` (unchanged, still double-gated). Its
+   `authorize()` rate-limits every attempt (success or failure) at
+   10/hour/address — separate from and more generous than the magic-link
+   limit, since mistyped-password retries are a normal pattern that sending
+   an email doesn't have — and runs a real scrypt computation even when no
+   user exists, so a nonexistent-email attempt doesn't respond measurably
+   faster than a wrong-password one (a timing side-channel that would
+   otherwise leak account existence). A correct password against an
+   unverified account throws a distinct `EmailNotVerifiedError` (extends
+   NextAuth v5's `CredentialsSignin`, which supports a `code` the client can
+   read from `signIn()`'s result) rather than a generic failure, without
+   leaking whether the email exists to someone who doesn't have the
+   password.
+4. **Every enumeration-sensitive response is now identical regardless of
+   outcome.** Signup returns the same `{ ok: true }` whether the email was
+   free, already had a password (nothing happens, no email sent), or was a
+   magic-link-only account (password gets attached to the existing row, a
+   verification email goes out); password-reset requests always return
+   `{ ok: true }` too.
+
+**Alternatives considered.**
+- **A separate password-reset token table** — rejected: the existing
+  `VerificationToken` + email-provider callback already does everything a
+  reset token needs (single-use, expiring, proves inbox ownership), and a
+  second table would mean a second thing to keep secure and tested for no
+  functional gain.
+- **bcrypt or argon2** — rejected in favor of the zero-dependency `crypto.
+scrypt` approach, consistent with this codebase's repeated preference for
+  hand-rolled crypto/parsing over a dependency (the Stripe REST client, the
+  PDF writer, the cron parser, and `crypto/tokens.ts` itself all follow this
+  pattern).
+
+**Consequences.** `User.passwordHash` is a new, nullable, additive column
+(migration `20260920120000_password_auth`) — every existing magic-link/
+Google user is unaffected and simply has no password until they set one.
+`docs/DEPLOYMENT.md`/`.env.example` need no new environment variables — the
+new flows reuse `AUTH_SECRET`, `EMAIL_FROM`, `RESEND_API_KEY`/
+`EMAIL_TRANSPORT` already required. Verified live against the real staging
+deployment (Supabase-backed), not just `pnpm test`/`pnpm build` — see
+`docs/STAGING.md` verification notes for the actual click-through result.
+
+---
+
 ## ADR-0048 — Relocate the generated Prisma client in the web Docker build via a shell step, not a customized `output` path
 
 **Context.** Building the staging web image for the first time ever (this

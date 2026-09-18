@@ -23,6 +23,9 @@ model User {
   emailVerified  DateTime?
   name           String?
   image          String?
+  // Salted scrypt hash ("salt:hash", both hex) — null for magic-link-only
+  // accounts that have never set a password. See packages/services/src/auth/password.ts.
+  passwordHash   String?
   // Bumped to invalidate all of a user's issued JWT sessions (revocation).
   sessionVersion Int       @default(0)
   createdAt      DateTime  @default(now())
