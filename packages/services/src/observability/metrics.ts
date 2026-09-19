@@ -254,3 +254,18 @@ export function recordUsageRejection(meter: string): void {
 export function recordWebhookSignatureFailure(provider: string): void {
   incr('webhook_signature_failures_total', 1, { provider });
 }
+
+/** Phase 1 — every integration sync attempt, by integration and outcome. */
+export function recordIntegrationSync(args: {
+  integration: string;
+  status: 'COMPLETED' | 'FAILED' | 'SKIPPED';
+  durationMs: number;
+}): void {
+  incr('integration_sync_total', 1, { integration: args.integration, status: args.status });
+  observe('integration_sync_duration_ms', args.durationMs, { integration: args.integration });
+}
+
+/** Phase 1 — token-lifecycle sweep outcomes (refreshed / reauth_needed / resealed / failed). */
+export function recordTokenLifecycle(outcome: string, by = 1): void {
+  if (by > 0) incr('integration_token_lifecycle_total', by, { outcome });
+}

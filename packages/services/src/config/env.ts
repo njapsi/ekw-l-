@@ -71,6 +71,8 @@ const schema = z
 
     AUTH_SECRET: isProd ? secret32 : secret32.optional(),
     ENCRYPTION_KEY: isProd ? secret32 : secret32.optional(),
+    // Set only during a key rotation window (tokens.ts `open` / token lifecycle re-seal).
+    ENCRYPTION_KEY_PREVIOUS: secret32.optional(),
     REDIS_URL: req(
       z
         .string()

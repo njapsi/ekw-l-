@@ -9,9 +9,7 @@ import { PasswordInput } from '@/components/auth/password-input';
 export function SetPasswordForm() {
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
-  const [fieldErrors, setFieldErrors] = useState<NonNullable<SetPasswordResult['fieldErrors']>>(
-    {},
-  );
+  const [fieldErrors, setFieldErrors] = useState<NonNullable<SetPasswordResult['fieldErrors']>>({});
   const [status, setStatus] = useState<'idle' | 'submitting' | 'done'>('idle');
 
   async function submit(e: React.FormEvent) {

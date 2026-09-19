@@ -22,3 +22,4 @@ export const tiktokSyncQueue = new Queue(QUEUE_NAMES.tiktokSync, { connection })
 export const searchConsoleSyncQueue = new Queue(QUEUE_NAMES.searchConsoleSync, { connection });
 export const contentPipelineQueue = new Queue(QUEUE_NAMES.contentPipeline, { connection });
 export const automationQueue = new Queue(QUEUE_NAMES.automation, { connection });
+export const integrationsQueue = new Queue(QUEUE_NAMES.integrations, { connection });

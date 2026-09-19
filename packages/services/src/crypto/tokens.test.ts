@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { generateEncryptionKey, keyIdFor, open, seal } from './tokens.js';
+import { generateEncryptionKey, isStaleKeyId, keyIdFor, open, seal } from './tokens.js';
 
 const KEY = generateEncryptionKey();
 const OTHER = generateEncryptionKey();
@@ -38,5 +38,28 @@ describe('token envelope encryption', () => {
     expect(keyIdFor(KEY)).toHaveLength(12);
     expect(keyIdFor(KEY)).toBe(keyIdFor(KEY));
     expect(keyIdFor(KEY)).not.toBe(keyIdFor(OTHER));
+  });
+});
+
+describe('key rotation', () => {
+  beforeEach(() => {
+    process.env.ENCRYPTION_KEY = KEY;
+    delete process.env.ENCRYPTION_KEY_PREVIOUS;
+  });
+
+  it('opens a row sealed with ENCRYPTION_KEY_PREVIOUS during a rotation window', () => {
+    const sealedWithOld = seal('refresh-token', OTHER);
+    process.env.ENCRYPTION_KEY_PREVIOUS = OTHER;
+    expect(open(sealedWithOld)).toBe('refresh-token');
+    expect(isStaleKeyId(sealedWithOld.keyId)).toBe(true);
+  });
+
+  it('still refuses an unknown key once the previous key is removed', () => {
+    const sealedWithOld = seal('refresh-token', OTHER);
+    expect(() => open(sealedWithOld)).toThrow(/keyId mismatch/);
+  });
+
+  it('does not treat a current-key row as stale', () => {
+    expect(isStaleKeyId(seal('x').keyId)).toBe(false);
   });
 });

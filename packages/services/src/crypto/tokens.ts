@@ -43,7 +43,28 @@ export function seal(plaintext: string, raw = process.env.ENCRYPTION_KEY): Seale
   };
 }
 
-export function open(sealed: SealedToken, raw = process.env.ENCRYPTION_KEY): string {
+/**
+ * Key rotation (Phase 1, Part 12): during a rotation window the old key is
+ * set as `ENCRYPTION_KEY_PREVIOUS`. Rows sealed with it still open, and the
+ * token-lifecycle sweep re-seals them under the current key (`isStaleKeyId`),
+ * after which the previous key can be removed.
+ */
+function previousKeyFor(keyId: string): string | undefined {
+  const prev = process.env.ENCRYPTION_KEY_PREVIOUS;
+  if (!prev) return undefined;
+  return keyIdFor(prev) === keyId ? prev : undefined;
+}
+
+/** True when a row was sealed with a key other than the current one. */
+export function isStaleKeyId(keyId: string, raw = process.env.ENCRYPTION_KEY): boolean {
+  return keyId !== keyIdFor(raw);
+}
+
+export function open(sealed: SealedToken, raw?: string): string {
+  if (raw === undefined) {
+    const current = process.env.ENCRYPTION_KEY;
+    raw = sealed.keyId === keyIdFor(current) ? current : (previousKeyFor(sealed.keyId) ?? current);
+  }
   const key = loadKey(raw);
   if (sealed.keyId !== keyIdFor(raw)) {
     throw new Error('Ciphertext was sealed with a different ENCRYPTION_KEY (keyId mismatch).');

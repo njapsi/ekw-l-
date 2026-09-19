@@ -10,7 +10,8 @@ const MIN_PASSWORD_LENGTH = 8;
 const MAX_PASSWORD_LENGTH = 128;
 
 function passwordError(password: string): string | undefined {
-  if (password.length < MIN_PASSWORD_LENGTH) return `Must be at least ${MIN_PASSWORD_LENGTH} characters.`;
+  if (password.length < MIN_PASSWORD_LENGTH)
+    return `Must be at least ${MIN_PASSWORD_LENGTH} characters.`;
   if (password.length > MAX_PASSWORD_LENGTH) return 'That password is too long.';
   return undefined;
 }
@@ -137,7 +138,10 @@ export async function setPasswordAction(input: {
   else if (password !== confirmPassword) fieldErrors.confirmPassword = 'Passwords do not match.';
   if (Object.keys(fieldErrors).length > 0) return { ok: false, fieldErrors };
 
-  await prisma.user.update({ where: { id: user.id }, data: { passwordHash: hashPassword(password) } });
+  await prisma.user.update({
+    where: { id: user.id },
+    data: { passwordHash: hashPassword(password) },
+  });
   await recordAudit({
     actorId: user.id,
     action: 'auth.password_set',

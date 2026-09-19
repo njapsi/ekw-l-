@@ -6,6 +6,7 @@
  */
 import { type Db, type UsageMeter, prisma } from '@growth-agent/db';
 import { resolveEntitlements } from '../billing/entitlements.js';
+import { connectedAccountCount } from './check.js';
 import {
   type BillingPeriod,
   type MeterKey,
@@ -59,7 +60,7 @@ export async function getUsageSummary(
   // Gauges reflect current reality even if no counter row exists yet.
   const [seatCount, connectedCount] = await Promise.all([
     db.membership.count({ where: { organizationId, status: 'ACTIVE' } }),
-    db.oAuthConnection.count({ where: { organizationId, status: 'ACTIVE' } }),
+    connectedAccountCount(organizationId, db),
   ]);
   usedByMeter.set('SEATS', seatCount);
   usedByMeter.set('CONNECTED_ACCOUNTS', connectedCount);

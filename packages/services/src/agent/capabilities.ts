@@ -17,6 +17,7 @@ import * as youtube from '../youtube/index.js';
 import * as tiktok from '../tiktok/index.js';
 import { assessMonetization } from '../youtube/monetization.js';
 import type { OrgContext } from './context.js';
+import { connectionFacts } from './integration-tools.js';
 import type { CapabilityId, EvidenceItem } from './schemas.js';
 
 const log = createLogger('agent.capabilities');
@@ -84,8 +85,19 @@ const orgContextCapability: Capability = {
   title: 'Connected-data snapshot',
   description: 'What the organization has connected and the freshest data available.',
   keywords: [],
-  run: (ctx) =>
-    Promise.resolve({
+  async run(ctx) {
+    // What the agent may actually use, per the capability model — so it never
+    // reasons as if a disconnected or under-scoped account were available.
+    let connections: string[] = [];
+    try {
+      connections = await connectionFacts(ctx.organizationId, ctx.db);
+    } catch (err) {
+      log.warn(
+        { err: err instanceof Error ? err.message : String(err) },
+        'connection facts unavailable for org-context',
+      );
+    }
+    return {
       capabilityId: 'org-context',
       status: 'ok',
       summary: 'Snapshot of connected sources and the most recent synced data.',
@@ -105,9 +117,11 @@ const orgContextCapability: Capability = {
             ? `Latest SEO crawl: ${ctx.orgContext.seo.latestCrawl.hostname} — ${ctx.orgContext.seo.latestCrawl.pagesCrawled} pages, ${ctx.orgContext.seo.latestCrawl.issuesFound} issues, score ${ctx.orgContext.seo.latestCrawl.overallScore ?? 'n/a'}/100.`
             : `${ctx.orgContext.seo.websites} website(s) registered; no completed crawl yet.`,
         ),
+        ...connections.map((c) => fact(`Connection status — ${c}`)),
       ],
       recommendations: [],
-    }),
+    };
+  },
 };
 
 // --- youtube-analyst -----------------------------------------------

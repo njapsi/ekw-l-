@@ -8,7 +8,7 @@ import {
 import { createLogger } from '@growth-agent/observability';
 import { recordAudit } from '../audit/index.js';
 import { AppError } from '../errors.js';
-import { open, seal } from '../crypto/tokens.js';
+import { isStaleKeyId, open, seal } from '../crypto/tokens.js';
 import { type OAuthTokenResponse, hasProviderOAuth, providerOAuth } from './oauth-token.js';
 
 const log = createLogger('integrations');
@@ -203,62 +203,105 @@ export async function withFreshAccessToken<T>(
     connection.status === 'ERROR';
 
   if (needsRefresh) {
-    if (!tokens.refreshToken) {
-      await db.oAuthConnection.update({
-        where: { id: connection.id },
-        data: { status: 'ERROR', lastError: 'No refresh token; reconnection required.' },
-      });
-      throw new ConnectionUnavailableError('Reconnect this account — its access has expired.');
-    }
-    try {
-      const refreshed = await providerOAuth(connection.provider).refresh(
-        tokens.refreshToken,
-        redirectUri,
-      );
-      const sealed = sealTokens(refreshed);
-      await db.oAuthConnection.update({
-        where: { id: connection.id },
-        data: {
-          accessTokenCipher: sealed.accessTokenCipher,
-          tokenIv: sealed.tokenIv,
-          tokenAuthTag: sealed.tokenAuthTag,
-          keyId: sealed.keyId,
-          expiresAt: sealed.expiresAt,
-          status: 'ACTIVE',
-          lastError: null,
-          lastRefreshedAt: new Date(),
-          ...(sealed.refreshTokenCipher
-            ? {
-                refreshTokenCipher: sealed.refreshTokenCipher,
-                refreshIv: sealed.refreshIv,
-                refreshAuthTag: sealed.refreshAuthTag,
-              }
-            : {}),
-        },
-      });
-      tokens = {
-        accessToken: refreshed.access_token,
-        refreshToken: tokens.refreshToken,
-        expiresAt: sealed.expiresAt,
-      };
-      log.info({ connectionId: connection.id }, 'refreshed access token');
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'refresh failed';
-      await db.oAuthConnection.update({
-        where: { id: connection.id },
-        data: { status: 'ERROR', lastError: message },
-      });
-      await db.integrationHealth.updateMany({
-        where: { oauthConnectionId: connection.id },
-        data: { ok: false, detail: `token refresh failed: ${message}`, lastCheckAt: new Date() },
-      });
-      throw new ConnectionUnavailableError(
-        'Could not refresh access to this account. Please reconnect it.',
-      );
-    }
+    tokens = await refreshConnectionTokens(connection, redirectUri, db, tokens);
   }
 
   return fn(tokens.accessToken);
+}
+
+/**
+ * Refresh a connection's access token now and persist it. Shared by
+ * `withFreshAccessToken` (just-in-time) and the token-lifecycle sweep
+ * (ahead of expiry). With no refresh token, or when the provider rejects the
+ * refresh, the row is marked ERROR and `ConnectionUnavailableError` thrown.
+ */
+export async function refreshConnectionTokens(
+  connection: OAuthConnection,
+  redirectUri: string,
+  db: Db = prisma,
+  current: DecryptedTokens = decrypt(connection),
+): Promise<DecryptedTokens> {
+  if (!current.refreshToken) {
+    await db.oAuthConnection.update({
+      where: { id: connection.id },
+      data: { status: 'ERROR', lastError: 'No refresh token; reconnection required.' },
+    });
+    throw new ConnectionUnavailableError('Reconnect this account — its access has expired.');
+  }
+  try {
+    const refreshed = await providerOAuth(connection.provider).refresh(
+      current.refreshToken,
+      redirectUri,
+    );
+    const sealed = sealTokens(refreshed);
+    await db.oAuthConnection.update({
+      where: { id: connection.id },
+      data: {
+        accessTokenCipher: sealed.accessTokenCipher,
+        tokenIv: sealed.tokenIv,
+        tokenAuthTag: sealed.tokenAuthTag,
+        keyId: sealed.keyId,
+        expiresAt: sealed.expiresAt,
+        status: 'ACTIVE',
+        lastError: null,
+        lastRefreshedAt: new Date(),
+        ...(sealed.refreshTokenCipher
+          ? {
+              refreshTokenCipher: sealed.refreshTokenCipher,
+              refreshIv: sealed.refreshIv,
+              refreshAuthTag: sealed.refreshAuthTag,
+            }
+          : {}),
+      },
+    });
+    log.info({ connectionId: connection.id }, 'refreshed access token');
+    return {
+      accessToken: refreshed.access_token,
+      refreshToken: refreshed.refresh_token ?? current.refreshToken,
+      expiresAt: sealed.expiresAt,
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'refresh failed';
+    await db.oAuthConnection.update({
+      where: { id: connection.id },
+      data: { status: 'ERROR', lastError: message },
+    });
+    await db.integrationHealth.updateMany({
+      where: { oauthConnectionId: connection.id },
+      data: { ok: false, detail: `token refresh failed: ${message}`, lastCheckAt: new Date() },
+    });
+    throw new ConnectionUnavailableError(
+      'Could not refresh access to this account. Please reconnect it.',
+    );
+  }
+}
+
+/**
+ * Re-encrypt a connection's tokens under the current ENCRYPTION_KEY when they
+ * were sealed with `ENCRYPTION_KEY_PREVIOUS` (key rotation). Returns whether
+ * anything changed.
+ */
+export async function resealConnectionIfStale(
+  connection: OAuthConnection,
+  db: Db = prisma,
+): Promise<boolean> {
+  if (!connection.accessTokenCipher || !isStaleKeyId(connection.keyId)) return false;
+  const t = decrypt(connection);
+  const access = seal(t.accessToken);
+  const refresh = t.refreshToken ? seal(t.refreshToken) : null;
+  await db.oAuthConnection.update({
+    where: { id: connection.id },
+    data: {
+      accessTokenCipher: access.cipher,
+      tokenIv: access.iv,
+      tokenAuthTag: access.authTag,
+      keyId: access.keyId,
+      refreshTokenCipher: refresh?.cipher ?? null,
+      refreshIv: refresh?.iv ?? null,
+      refreshAuthTag: refresh?.authTag ?? null,
+    },
+  });
+  return true;
 }
 
 export async function disconnectConnection(

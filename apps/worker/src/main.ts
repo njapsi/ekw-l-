@@ -6,6 +6,7 @@ import { logger } from './logger.js';
 import { type AgentJob, processAgentJob } from './processors/agent.js';
 import { type AutomationJob, processAutomationJob } from './processors/automation.js';
 import { type ContentJob, processContentJob } from './processors/content.js';
+import { type IntegrationsJob, processIntegrationsJob } from './processors/integrations.js';
 import { type ReportJob, processReportJob } from './processors/report.js';
 import { type SearchConsoleJob, processSearchConsoleJob } from './processors/search-console.js';
 import { type SeoJob, closeSeoRenderer, processSeoJob } from './processors/seo.js';
@@ -13,7 +14,7 @@ import { type TikTokJob, processTikTokJob } from './processors/tiktok.js';
 import { type YouTubeJob, processYouTubeJob } from './processors/youtube.js';
 import { startHealthServer } from './health-server.js';
 import { instrumentJob, startHeartbeat } from './observability.js';
-import { QUEUE_NAMES, automationQueue, connection } from './queues.js';
+import { QUEUE_NAMES, automationQueue, connection, integrationsQueue } from './queues.js';
 
 /**
  * Worker entrypoint. The YouTube, TikTok, SEO, Growth Agent, content-pipeline,
@@ -35,6 +36,7 @@ const PROCESSORS: Record<string, Processor> = {
   [QUEUE_NAMES.contentPipeline]: (job) => processContentJob(job as Job<ContentJob>),
   [QUEUE_NAMES.report]: (job) => processReportJob(job as Job<ReportJob>),
   [QUEUE_NAMES.automation]: (job) => processAutomationJob(job as Job<AutomationJob>),
+  [QUEUE_NAMES.integrations]: (job) => processIntegrationsJob(job as Job<IntegrationsJob>),
 };
 
 /** Register the repeatable scheduler ticks (idempotent — keyed job ids). */
@@ -69,7 +71,28 @@ async function registerSchedules(): Promise<void> {
       removeOnFail: 20,
     },
   );
-  logger.info('automation + lifecycle scheduler ticks registered');
+  // Phase 1: scheduled integration syncs + token/credential lifecycle.
+  await integrationsQueue.add(
+    'sync-sweep',
+    { type: 'sync-sweep' },
+    {
+      repeat: { every: 15 * 60_000 },
+      jobId: 'integrations-sync-sweep',
+      removeOnComplete: 50,
+      removeOnFail: 50,
+    },
+  );
+  await integrationsQueue.add(
+    'lifecycle-sweep',
+    { type: 'lifecycle-sweep' },
+    {
+      repeat: { every: 15 * 60_000 },
+      jobId: 'integrations-lifecycle-sweep',
+      removeOnComplete: 50,
+      removeOnFail: 50,
+    },
+  );
+  logger.info('automation + lifecycle + integration scheduler ticks registered');
 }
 
 function startWorker(name: string, processor: Processor) {
@@ -99,6 +122,7 @@ async function shutdown(signal: string) {
   healthServer.close();
   await Promise.all(workers.map((w) => w.close()));
   await automationQueue.close();
+  await integrationsQueue.close();
   await closeSeoRenderer();
   await observability.closeObservabilityQueues();
   await observability.closeObservabilityRedis();

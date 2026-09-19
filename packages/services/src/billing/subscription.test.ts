@@ -55,6 +55,8 @@ function makeDb(seed: Partial<Record<string, unknown>> = {}) {
     usageRecord: { aggregate: vi.fn(async () => ({ _sum: { quantity: null } })) },
     membership: { count: vi.fn(async () => 1) },
     oAuthConnection: { count: vi.fn(async () => 0) },
+    // WordPress sites also count as connected accounts (ADR-0051).
+    wordPressSite: { count: vi.fn(async () => 0) },
     auditLog: { create: vi.fn(async () => ({})) },
     $transaction: vi.fn(async (fn: any) => fn(db)),
   };

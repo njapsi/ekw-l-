@@ -840,7 +840,7 @@ test:e2e` run with **61/88 tests passing** (every non-DB-dependent test,
   claim was `next build`/`tsc` only, never a real container): **(1)**
   `Dockerfile.web`'s build stage inherited from `base` instead of `deps`,
   missing pnpm's per-package `node_modules/.bin` symlinks (`prisma: not
-  found`); **(2)** the runner's "belt & suspenders" Prisma copy pointed at a
+found`); **(2)** the runner's "belt & suspenders" Prisma copy pointed at a
   path that never existed under pnpm's isolated linker, and — after a
   reverted false start that broke `@growth-agent/db`'s
   `export * from '@prisma/client'` for every consumer, see ADR-0048 — at a
@@ -854,7 +854,7 @@ test:e2e` run with **61/88 tests passing** (every non-DB-dependent test,
   schema engine) that `generate` never fetches, now pre-warmed at build
   time. Separately, **both** `docker-compose.staging.yml` and
   `docker-compose.production.yml` had `internal: true` on the network
-  `web`/`worker`/`migrate` all share — which blocks *all* outbound traffic,
+  `web`/`worker`/`migrate` all share — which blocks _all_ outbound traffic,
   not just inbound exposure, directly contradicting this project's own
   external-managed-Postgres/Redis architecture; removed from both files.
   Also fixed live: two admin-only Prisma re-export/inference bugs
@@ -868,7 +868,7 @@ test:e2e` run with **61/88 tests passing** (every non-DB-dependent test,
   app degrades correctly, confirmed live (TikTok "Connect" simply
   unavailable; billing runs everyone on FREE with a "not configured"
   banner, no error). Email runs in `console` mode (magic links print to
-  the container log rather than sending). All of this is now the *real*,
+  the container log rather than sending). All of this is now the _real_,
   load-bearing runbook, not a rehearsal: `docs/STAGING.md`,
   `docker-compose.staging.yml`, `.env.staging.example` (all from the
   original pass below still describe the intended shape correctly; the
@@ -956,7 +956,7 @@ test:e2e` run with **61/88 tests passing** (every non-DB-dependent test,
   of the existing magic-link-only auth, without touching how magic-link,
   Google, or dev-login work. `User.passwordHash` (new, nullable, additive
   migration `20260920120000_password_auth`); `packages/services/src/auth/
-  password.ts` hashes with salted scrypt via `node:crypto` — no bcrypt/
+password.ts` hashes with salted scrypt via `node:crypto` — no bcrypt/
   argon2 dependency, matching `crypto/tokens.ts`'s existing hand-rolled-
   crypto convention. New `password` Credentials provider rate-limits every
   attempt (10/hour/address) and runs a real scrypt computation even for a
@@ -977,6 +977,49 @@ test:e2e` run with **61/88 tests passing** (every non-DB-dependent test,
   verification email → click → signed in → log out → password login →
   forgot password → reset → login with the new password) — see
   `docs/STAGING.md`.
+- **Real integrations & connection platform** ✅ (operator's "Phase 1"):
+  `packages/services/src/integrations/contract.ts` has the 8-state
+  `ConnectionState`, 5-level `CapabilityLevel` with its approval policy, the
+  descriptor registry, and pure state/capability/diagnostic resolution
+  (ADR-0050). `center.ts` is the tenant-scoped Connection Center read model:
+  state, diagnostic, scope-resolved capabilities, and last success/failure
+  sync. `probe.ts` is a real read-only "Test connection".
+  `resilience.ts` provides the shared `IntegrationApiError` vocabulary,
+  full-jitter retry honouring `Retry-After`, a per-key in-process circuit
+  breaker, and timeouts.
+  **WordPress connector** (`packages/services/src/wordpress/`): Application
+  Password auth over core `wp/v2`, credential AES-256-GCM-sealed in a new
+  `WordPressSite` table, SSRF-safe pinned HTTP (crawler `assertSafeUrl`,
+  redirects never followed, only GET retried), WordPress-capability
+  detection as the connection's "scopes", post/page mirror
+  (`WordPressContent`, deletions only after a complete pagination), draft
+  creation (DRAFT, direct), update/publish (WRITE/PUBLISH, approval-only),
+  and disconnect with upstream app-password revocation.
+  **Sync framework** (`sync/`): one `runIntegrationSync` for all providers,
+  an `IntegrationSyncRun` ledger, insert-then-check single-flight,
+  stale-run recovery, a failure notice after 3 consecutive failures, and
+  scheduled freshness sweeps with exponential failure backoff
+  (`INTEGRATION_SCHEDULED_SYNC=0` kill switch).
+  **Token lifecycle** (`integrations/lifecycle.ts`): refresh-ahead at most
+  every 6 h per connection, reauth notifications, daily WordPress
+  re-validation, `ENCRYPTION_KEY_PREVIOUS` key-rotation re-seal, and approval
+  TTL.
+  **Approval queue** (`approvals/`): `IntegrationActionRequest`, a closed
+  executor registry, permissions re-checked at execution time, and
+  exactly-once claims.
+  **Agent tools** (`agent/integration-tools.ts`): capability-guarded READ
+  tools plus `propose_action` (PENDING only); `org-context` evidence now
+  includes connection state.
+  New `integrations` BullMQ queue with `sync-sweep` + `lifecycle-sweep`
+  ticks. Migration `20260921120000_integration_platform` (4 additive tables,
+  diffed equal to Prisma's generated SQL). UI: `/app/integrations`
+  Connection Center (sync now / last sync / approvals banner),
+  `/app/integrations/wordpress`, `/app/integrations/approvals`.
+  WordPress sites count toward `CONNECTED_ACCOUNTS`.
+  Gates: lint 14/14, typecheck 14/14, **`packages/services` 843 tests**
+  (+157 over the pre-Phase-1 686), tenant-scope + audit gates, web build.
+  See `docs/INTEGRATIONS.md`, `docs/WORDPRESS-INTEGRATION.md`,
+  `docs/PHASE-1-REPORT.md`, ADR-0050, ADR-0051.
 - **Still outstanding:** roadmap "Phase 3" (auth & tenancy hardening — **Postgres
   RLS (ADR-0035)**, the
   full edge/IP rate-limit layer + aggregate magic-link cap, a strict nonce-based

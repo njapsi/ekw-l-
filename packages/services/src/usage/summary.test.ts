@@ -69,6 +69,8 @@ function makeDb(
     },
     membership: { count: vi.fn(async () => opts.seats ?? 2) },
     oAuthConnection: { count: vi.fn(async () => opts.connected ?? 1) },
+    // WordPress sites also count as connected accounts (ADR-0051).
+    wordPressSite: { count: vi.fn(async () => 0) },
   };
 }
 

@@ -12,6 +12,7 @@ export const QUEUE_NAMES = {
   searchConsoleSync: 'search-console-sync',
   contentPipeline: 'content-pipeline',
   automation: 'automation',
+  integrations: 'integrations',
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
@@ -26,4 +27,5 @@ export const QUEUE_ORDER: readonly QueueName[] = [
   QUEUE_NAMES.searchConsoleSync,
   QUEUE_NAMES.contentPipeline,
   QUEUE_NAMES.automation,
+  QUEUE_NAMES.integrations,
 ];

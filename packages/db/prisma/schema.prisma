@@ -190,11 +190,15 @@ model Organization {
   notifications             Notification[]
   searchConsoleSites        SearchConsoleSite[]
   searchConsoleSnapshots    SearchConsoleSnapshot[]
+  wordPressSites            WordPressSite[]
+  wordPressContent          WordPressContent[]
+  integrationSyncRuns       IntegrationSyncRun[]
+  integrationActions        IntegrationActionRequest[]
 
   // Set when an OWNER requested deletion; the org is hidden immediately and a
   // grace-period purge job hard-deletes it (cascading every tenant row) after
   // `deletionScheduledAt`.
-  deletionScheduledAt DateTime?
+  deletionScheduledAt   DateTime?
   deletionRequestedById String?
 
   @@map("organizations")
@@ -1934,7 +1938,7 @@ enum SearchConsoleSnapshotKind {
 }
 
 model SearchConsoleSite {
-  id                String                   @id @default(cuid())
+  id                String                    @id @default(cuid())
   organizationId    String
   oauthConnectionId String
   /// The GSC property id: "sc-domain:example.com" or "https://example.com/".
@@ -1962,17 +1966,17 @@ model SearchConsoleSite {
 }
 
 model SearchConsoleSnapshot {
-  id                  String                   @id @default(cuid())
+  id                  String                    @id @default(cuid())
   organizationId      String
   searchConsoleSiteId String
   kind                SearchConsoleSnapshotKind
   /// For URL_INSPECTION: the inspected URL (one snapshot per URL, latest wins).
   subjectUrl          String?
-  rangeStart          DateTime?                @db.Date
-  rangeEnd            DateTime?                @db.Date
+  rangeStart          DateTime?                 @db.Date
+  rangeEnd            DateTime?                 @db.Date
   /// Zod-validated capture of the official API output (see searchconsole/schemas.ts).
   data                Json
-  capturedAt          DateTime                 @default(now())
+  capturedAt          DateTime                  @default(now())
 
   organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   site         SearchConsoleSite @relation(fields: [searchConsoleSiteId], references: [id], onDelete: Cascade)
@@ -1980,4 +1984,149 @@ model SearchConsoleSnapshot {
   @@index([searchConsoleSiteId, kind, capturedAt])
   @@index([organizationId])
   @@map("search_console_snapshots")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1 — unified integration platform (ADR-0051). Additive only.
+// ---------------------------------------------------------------------------
+
+/// A self-hosted WordPress site connected with an Application Password
+/// (WordPress 5.6+ core feature). Not OAuth, so it does not live in
+/// `oauth_connections`; the credential uses the same AES-256-GCM envelope.
+model WordPressSite {
+  id                   String           @id @default(cuid())
+  organizationId       String
+  /// Canonical https origin, e.g. "https://blog.example.com".
+  siteUrl              String
+  siteName             String?
+  /// WordPress username the application password belongs to.
+  username             String
+  credentialCipher     String           @db.Text
+  credentialIv         String
+  credentialAuthTag    String
+  keyId                String
+  status               ConnectionStatus @default(ACTIVE)
+  /// WordPress capabilities detected for this user (edit_posts,
+  /// publish_posts, ...) — the "scopes" the capability model resolves against.
+  detectedCapabilities String[]
+  wpUserId             Int?
+  lastError            String?
+  lastCheckAt          DateTime?
+  lastCheckOk          Boolean?
+  createdById          String?
+  createdAt            DateTime         @default(now())
+  updatedAt            DateTime         @updatedAt
+
+  organization Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  content      WordPressContent[]
+
+  @@unique([organizationId, siteUrl])
+  @@index([organizationId])
+  @@map("wordpress_sites")
+}
+
+enum WordPressContentType {
+  POST
+  PAGE
+}
+
+/// A read-only cache of posts/pages exactly as WordPress returned them.
+model WordPressContent {
+  id              String               @id @default(cuid())
+  organizationId  String
+  wordPressSiteId String
+  wpId            Int
+  type            WordPressContentType
+  status          String
+  title           String
+  link            String?
+  slug            String?
+  excerpt         String?              @db.Text
+  modifiedAt      DateTime?
+  syncedAt        DateTime             @default(now())
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  site         WordPressSite @relation(fields: [wordPressSiteId], references: [id], onDelete: Cascade)
+
+  @@unique([wordPressSiteId, type, wpId])
+  @@index([organizationId])
+  @@map("wordpress_content")
+}
+
+enum IntegrationSyncTrigger {
+  MANUAL
+  SCHEDULED
+  AUTOMATION
+}
+
+/// One row per sync attempt for any integration — the unified ledger the
+/// Connection Center reads last-success / last-failure from. Provider-specific
+/// run tables (youtube_sync_runs, tiktok_sync_runs) are unchanged.
+model IntegrationSyncRun {
+  id             String                 @id @default(cuid())
+  organizationId String
+  /// IntegrationKey: YOUTUBE | GOOGLE_SEARCH_CONSOLE | TIKTOK | WORDPRESS.
+  integration    String
+  /// Id of the backing row (OAuthConnection or WordPressSite).
+  connectionRef  String
+  trigger        IntegrationSyncTrigger
+  status         SyncStatus             @default(RUNNING)
+  itemsProcessed Int                    @default(0)
+  error          String?
+  startedAt      DateTime               @default(now())
+  finishedAt     DateTime?
+  durationMs     Int?
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, integration, startedAt])
+  @@index([connectionRef, status])
+  @@map("integration_sync_runs")
+}
+
+enum IntegrationActionStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXECUTED
+  FAILED
+  CANCELLED
+  EXPIRED
+}
+
+enum IntegrationActionSource {
+  USER
+  AGENT
+  AUTOMATION
+}
+
+/// The approval queue that enforces the capability permission model: every
+/// WRITE / PUBLISH / DANGEROUS action is a row here first, and only an
+/// explicit human decision moves it to execution.
+model IntegrationActionRequest {
+  id             String                  @id @default(cuid())
+  organizationId String
+  integration    String
+  connectionRef  String
+  capabilityId   String
+  /// CapabilityLevel at request time (READ | DRAFT | WRITE | PUBLISH | DANGEROUS).
+  level          String
+  summary        String
+  payload        Json
+  status         IntegrationActionStatus @default(PENDING)
+  source         IntegrationActionSource @default(USER)
+  requestedById  String?
+  decidedById    String?
+  decidedAt      DateTime?
+  executedAt     DateTime?
+  result         Json?
+  error          String?
+  expiresAt      DateTime
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, status, createdAt])
+  @@map("integration_action_requests")
 }

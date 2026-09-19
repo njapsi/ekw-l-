@@ -16,10 +16,22 @@ async function gaugeUsed(organizationId: string, meter: MeterKey, db: Db): Promi
   if (meter === 'SEATS') {
     return db.membership.count({ where: { organizationId, status: 'ACTIVE' } });
   }
-  if (meter === 'CONNECTED_ACCOUNTS') {
-    return db.oAuthConnection.count({ where: { organizationId, status: 'ACTIVE' } });
-  }
+  if (meter === 'CONNECTED_ACCOUNTS') return connectedAccountCount(organizationId, db);
   return 0;
+}
+
+/**
+ * Every live external account counts toward the plan's CONNECTED_ACCOUNTS
+ * limit — OAuth connections and WordPress sites alike (a WordPress site is not
+ * an OAuth row, but it is a connected account). Both count ACTIVE rows only,
+ * matching the long-standing OAuth behaviour.
+ */
+export async function connectedAccountCount(organizationId: string, db: Db): Promise<number> {
+  const [oauth, wordpress] = await Promise.all([
+    db.oAuthConnection.count({ where: { organizationId, status: 'ACTIVE' } }),
+    db.wordPressSite.count({ where: { organizationId, status: 'ACTIVE' } }),
+  ]);
+  return oauth + wordpress;
 }
 
 export interface UsageVerdict {

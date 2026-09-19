@@ -6,6 +6,174 @@ reversal gets a new ADR that supersedes the old one.
 
 ---
 
+## ADR-0051 — WordPress via Application Passwords, a unified sync ledger, refresh-ahead lifecycle, and an approval queue as the enforcement point
+
+**Context.** ADR-0050 gave every integration one vocabulary. Phase 1 still
+required a WordPress connector (zero code existed), shared API resilience, a
+sync framework, token lifecycle management, AI tool exposure, and an
+_enforced_ permission model. Until now the capability levels only described
+behaviour.
+
+**Decision.**
+
+1. **WordPress uses core Application Passwords over the `wp/v2` REST API.**
+   It does not use OAuth or a plugin. Application Passwords ship in WordPress
+   core (5.6+), so no Growth Agent plugin has to be installed and maintained
+   on customer sites. Credentials live in a new `WordPressSite` table, not in
+   `oauth_connections`: there is no refresh token and no expiry, and the
+   OAuth table's non-null token columns would be meaningless.
+   WordPress-detected capabilities (`edit_posts`, `publish_posts`, …) act as
+   the connection's "scopes", so `resolveCapabilities` works unchanged.
+2. **User-supplied WordPress URLs reuse the crawler's SSRF guard.** Requests
+   go through resolve → validate → pin. Redirects are never followed, because
+   the credential travels in a header. Only GET is retried. This keeps hard
+   rule 7 intact for the one new code path that fetches a user URL.
+3. **A dedicated `integrations/resilience.ts`.** Existing provider clients are
+   not retrofitted: their retry paths are tested and working. The breaker is
+   in-process, not in Redis. A shared breaker would add a network hop to
+   every provider call to protect against a condition the provider already
+   signals with 429 / 5xx.
+4. **`IntegrationSyncRun` is an additional ledger, not a replacement** for
+   `youtube_sync_runs` / `tiktok_sync_runs`. Single-flight uses
+   insert-then-check with a total order over `(startedAt, id)`, not a Redis
+   lock. That needs no new infrastructure, and a crashed holder cannot leak a
+   lock because stale runs close after 30 min.
+5. **Refresh-ahead is rate-limited to once per 6 h per connection.** Google
+   access tokens live 1 h. Refreshing everything within 15 min of expiry would
+   refresh each connection ~4×/hour forever. Every 6 h is enough to discover
+   a revoked refresh token before a user or a scheduled sync hits it.
+6. **The approval queue is the only path to an external write.**
+   `IntegrationActionRequest` + a closed executor registry, where every
+   executor is WRITE / PUBLISH. Permissions are re-checked at execution time.
+   A conditional `updateMany` claim means concurrent approvals execute once.
+   There is no "skip approval" switch: hard rule 4 permits one ("automation
+   mode"), but no such mode exists, so the safe default applies.
+7. **Agent tools can observe and propose, never execute.** `propose_action`
+   creates a PENDING request attributed to the agent (`source = AGENT`,
+   audit `actorType = AGENT`). This extends ADR-0022 to integrations.
+8. **Key rotation via `ENCRYPTION_KEY_PREVIOUS`.** `open()` accepts a row
+   sealed with the previous key. The lifecycle sweep re-seals under the
+   current key and logs how many credentials remain stale.
+
+**Alternatives considered.**
+
+- _WordPress OAuth via a companion plugin_ — rejected: every customer would
+  have to install and trust our plugin, and core already provides a scoped,
+  revocable credential.
+- _A `WORDPRESS` value in `IntegrationProvider` + reuse of `oauth_connections`_
+  — rejected (point 1).
+- _Temporal / a workflow engine for sync_ — rejected: BullMQ repeatable ticks
+  plus a DB ledger cover single-flight, retry and backoff at this scale
+  (the Phase 0 recommendation stands).
+- _Proactive refresh on every tick_ — rejected (point 5).
+
+**Consequences.**
+
+- Two new repeatable worker ticks (`integrations` queue).
+- A new migration, `20260921120000_integration_platform`: four additive
+  tables and no changes to existing ones. It was diffed against Prisma's own
+  generated SQL and matches exactly.
+- WordPress sites count toward `CONNECTED_ACCOUNTS`.
+- Scheduled syncs spend provider quota daily (YouTube ≈ one full incremental
+  sync per connection per day). `INTEGRATION_SCHEDULED_SYNC=0` disables them.
+- The approvals page is the single place external writes happen. TikTok
+  publishing remains on its own pre-existing approval flow until it is
+  migrated onto the queue.
+
+---
+
+## ADR-0050 — A unified integration contract layered over the existing connection tables, not a rewrite
+
+**Context.** Phase 1 asks for a single integration architecture covering
+YouTube, TikTok, Google Search Console, websites and (net-new) WordPress,
+with eight connection states, a capability/permission model, and real
+diagnostics. What actually existed was four unrelated shapes: an
+`OAuthConnection` row with a four-value `ConnectionStatus`
+(`ACTIVE | EXPIRED | REVOKED | ERROR`), a separate `IntegrationHealth` row,
+a `Website` row with a `verified` boolean and no status concept at all, and
+— for WordPress — nothing. `/app/integrations` rendered a binary
+`Connected` / outline badge computed inline in the page component, with no
+health, no expiry, no capability list and no diagnostics.
+
+**Decision.** Add a pure, additive contract layer rather than restructuring
+the working OAuth code.
+
+1. **`integrations/contract.ts`** holds the whole vocabulary and no I/O:
+   the eight-state `ConnectionState`, a five-level `CapabilityLevel`
+   (READ / DRAFT / WRITE / PUBLISH / DANGEROUS) with its approval policy,
+   an `IntegrationDescriptor` registry for all five integrations, a pure
+   `resolveConnectionState()`, `resolveCapabilities()`, and
+   `diagnoseConnection()`. Being I/O-free makes every branch unit-testable
+   without a database — the reason the state machine has 34 tests behind it
+   on a machine with no Postgres.
+
+2. **No schema change.** All eight states are _derived_ from rows that
+   already exist. In particular `EXPIRED` vs `REAUTH_REQUIRED` — the one
+   distinction users actually care about — is derived from whether a
+   refresh token is stored, which the existing `refreshTokenCipher` column
+   already tells us. Adding four enum values to `ConnectionStatus` would
+   have forced a migration and a rewrite of `withFreshAccessToken`'s
+   working status transitions to buy nothing.
+
+3. **`IntegrationKey` is deliberately wider than Prisma's
+   `IntegrationProvider` enum.** A website is a first-class integration
+   with no credentials (its authorization is ownership verification, not a
+   token), and WordPress will use Application Passwords rather than OAuth.
+   Forcing either into the OAuth table to get a unified UI would be the
+   wrong trade. The key type is therefore a separate union, and
+   `center.ts` maps each key onto whichever table actually backs it.
+
+4. **"Not configured" and "not connected" are different states, and
+   "not implemented" is a third.** Conflating them is why a Connect button
+   could previously lead to a failure — on staging, TikTok has no
+   credentials, so its card offered a working-looking button. The
+   Connection Center now distinguishes an operator problem ("this
+   deployment is missing the credentials") from a user one ("you have not
+   connected your account") from an honest product gap (WordPress:
+   `implemented: false`, rendered as unavailable, never as a Connect
+   button that goes nowhere).
+
+5. **Diagnostics never say "something went wrong."** `diagnoseConnection`
+   classifies conservatively — an unrecognised provider error is
+   `PROVIDER`, never a guess at `AUTH` — and always returns a title, a
+   plain-language explanation, a recommended action, a secret-scrubbed
+   technical detail and a deterministic reference id. It is also
+   defensive: a key with no descriptor degrades to a generic label rather
+   than throwing, because a diagnostic function must never itself be the
+   thing that crashes. (A test caught exactly that defect during this
+   phase.)
+
+6. **`integrations/probe.ts` makes connection testing real.** Until now
+   `IntegrationHealth` was only ever written as a side effect of a sync, so
+   a never-synced connection showed "never checked" with no way to check
+   it. `testConnection()` makes one genuine, cheapest-available read-only
+   call per provider (`youtube/v3/channels?part=id&mine=true` at 1 quota
+   unit; `webmasters/v3/sites`; `user/info/?fields=open_id`), bounded by a
+   10s timeout, refreshing first via the existing `withFreshAccessToken`,
+   and records the true outcome. It never reports success it did not
+   observe.
+
+**Alternatives considered.** _Extend the `ConnectionStatus` enum to eight
+values_ — rejected: a migration plus a rewrite of working refresh logic, to
+persist what is already derivable. _Put websites and WordPress into
+`OAuthConnection`_ — rejected: neither has OAuth tokens, and the table's
+encrypted-token columns are non-nullable for a reason. _A model-driven
+capability list_ — rejected outright; capabilities are a security boundary
+and stay a hard-coded registry checked against actually-granted scopes.
+
+**Consequences.** The Connection Center is one query pass and one pure
+function away from any caller, so the agent tool layer (Phase 1 Part 13)
+can reuse `resolveCapabilities` to decide what it is allowed to attempt,
+rather than re-deriving permissions. `resolveConnectionState` is the single
+place state is defined, so adding WordPress later means adding a descriptor
+and a branch in `center.ts` — not another status vocabulary. The cost is
+that `IntegrationKey` and `IntegrationProvider` must be kept in step by
+hand; `diagnoseConnection`'s missing-descriptor fallback and `probe.ts`'s
+missing-probe branch both exist so a mismatch degrades honestly instead of
+crashing.
+
+---
+
 ## ADR-0049 — Email+password auth, added alongside magic-link, reusing its verification-token mechanism
 
 **Context.** The app shipped with passwordless-only auth: a magic-link
@@ -17,14 +185,15 @@ login, self-service password reset), while keeping every existing sign-in
 path working unchanged.
 
 **Decision.**
+
 1. **No parallel token system.** Every "send a secure, single-use, expiring,
    verification link" requirement (post-signup verification, password
    reset) is already built — Auth.js's own email-provider callback marks
    `emailVerified` and establishes a session when a `VerificationToken` is
    redeemed. Both new flows call the same server-side `signIn('nodemailer',
-   { email, callbackUrl })` the existing magic-link login already uses, just
+{ email, callbackUrl })` the existing magic-link login already uses, just
    pointed at a different `callbackUrl` (`/app` for verification, `/app/
-   set-password` for reset — landing the now-authenticated user on a page to
+set-password` for reset — landing the now-authenticated user on a page to
    choose a new password). This means no new database table, and the
    existing 5/hour/address magic-link rate limit
    (`packages/services/src/auth/config.ts`) covers both new flows for free.
@@ -56,6 +225,7 @@ path working unchanged.
    `{ ok: true }` too.
 
 **Alternatives considered.**
+
 - **A separate password-reset token table** — rejected: the existing
   `VerificationToken` + email-provider callback already does everything a
   reset token needs (single-use, expiring, proves inbox ownership), and a
@@ -101,7 +271,7 @@ revealed the real cost: with a customized `output`, Prisma no longer
 patches `@prisma/client`'s own `index.js`/`index.d.ts` to point at the
 generated client, so `@growth-agent/db`'s `export * from '@prisma/client'`
 stopped re-exporting any model types — breaking type imports in every
-*other* workspace package that imports a Prisma model type through
+_other_ workspace package that imports a Prisma model type through
 `@growth-agent/db` (`packages/services`'s tiktok/youtube/usage modules, at
 minimum). This was caught only because the worker image had never
 previously built far enough to exercise it, not by any test suite.
@@ -122,12 +292,12 @@ despite that being the runner's original (also never-worked) guess: a live
 `/api/health` failure after deploying enumerated Prisma's actual runtime
 search locations for a Next.js standalone build, and the one that's a
 real Next.js-standalone convention is `<app-dir>/.prisma/client` — a
-hidden folder *sibling to `server.js` itself*
+hidden folder _sibling to `server.js` itself_
 (`apps/web/.prisma/client`), not anywhere under the standalone root's
 `node_modules`. The runner's copy destination was corrected to match.
 Two further sibling issues surfaced in the same live-deploy pass, both
 fixed alongside this one: OpenSSL version detection needs the `openssl`
-CLI installed in *every* stage that touches Prisma, including both
+CLI installed in _every_ stage that touches Prisma, including both
 runner stages (each a fresh `FROM node:...`, inheriting nothing from the
 build stage) — without it, Prisma silently guesses the wrong target and
 the mismatch only surfaces as this same "engine not found" class of error;
@@ -177,6 +347,7 @@ picks all of them up automatically, with zero component edits and zero
 change to any feature.
 
 **Alternatives considered.**
+
 - **A `<link rel="stylesheet" href="https://fonts.googleapis.com/...">` tag**
   (what the mockup itself uses, being a standalone artifact with no CSP) —
   rejected: the app's `next.config.mjs` CSP is `style-src 'self'
