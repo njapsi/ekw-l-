@@ -28,6 +28,8 @@ function fakeDb(opts: { existingConvoOrg?: string } = {}) {
     youTubeMetric: { count: zeroCount },
     task: { count: zeroCount, findMany: emptyFindMany },
     recommendation: { count: zeroCount, findMany: emptyFindMany },
+    // No stored AI governance policy ⇒ defaults (ADR-0052).
+    aiGovernancePolicy: { findUnique: emptyFindFirst },
     // conversations
     aIConversation: {
       findFirst: vi.fn(async ({ where }: any) => {

@@ -17,6 +17,7 @@ import {
 } from '@growth-agent/db';
 import { recordAudit } from '../audit/index.js';
 import { AppError } from '../errors.js';
+import { assertAutomationAllowed, getGovernancePolicy } from '../governance/index.js';
 import { authorize } from '../rbac/authorize.js';
 import { CronError, cronForCadence, describeCron, nextRunAfter, parseCron } from './cron.js';
 import {
@@ -101,6 +102,46 @@ function resolveSchedule(input: AutomationInput, from: Date): ResolvedSchedule {
   return { cadence: input.cadence, cronExpression: cron, nextRunAt };
 }
 
+/** Smallest gap between consecutive runs over the next dozen occurrences. */
+export function minMinutesBetweenRuns(cron: string, from: Date = new Date()): number | null {
+  try {
+    let prev = nextRunAfter(cron, from);
+    let min = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < 12; i++) {
+      const next = nextRunAfter(cron, prev);
+      min = Math.min(min, (next.getTime() - prev.getTime()) / 60_000);
+      prev = next;
+    }
+    return Number.isFinite(min) ? Math.round(min) : null;
+  } catch {
+    // An unparseable expression is rejected by resolveSchedule first.
+    return null;
+  }
+}
+
+/**
+ * Why a run of this task type must not happen now, or null. Checked by the
+ * runner at execution time (policy or org state may have changed).
+ */
+export async function automationBlockReason(
+  organizationId: string,
+  taskType: string,
+  db: Db = prisma,
+): Promise<string | null> {
+  const org = await db.organization.findUnique({
+    where: { id: organizationId },
+    select: { deletedAt: true, deletionScheduledAt: true },
+  });
+  if (!org || org.deletedAt || org.deletionScheduledAt) {
+    return 'organization is scheduled for deletion';
+  }
+  const policy = await getGovernancePolicy(organizationId, db);
+  if (!(policy.automation.allowedTaskTypes as readonly string[]).includes(taskType)) {
+    return 'task type is not allowed by the AI governance policy';
+  }
+  return null;
+}
+
 export interface CreateAutomationInput extends AutomationInput {
   organizationId: string;
   /** The acting user — also the owner of the new rule. */
@@ -117,6 +158,12 @@ export async function createAutomation(input: CreateAutomationInput, db: Db = pr
   const config = parseConfigOrThrow(taskType, input.config);
   const schedule = resolveSchedule(input, new Date());
   const maxRetries = clampRetries(input.maxRetries);
+  await assertAutomationAllowed(
+    input.organizationId,
+    taskType,
+    minMinutesBetweenRuns(schedule.cronExpression),
+    db,
+  );
 
   const rule = await db.automationRule.create({
     data: {
@@ -187,6 +234,12 @@ export async function updateAutomation(input: UpdateAutomationInput, db: Db = pr
     maxRetries: input.maxRetries,
   };
   const schedule = resolveSchedule(merged, new Date());
+  await assertAutomationAllowed(
+    input.organizationId,
+    taskType,
+    minMinutesBetweenRuns(schedule.cronExpression),
+    db,
+  );
 
   const updated = await db.automationRule.update({
     where: { id: rule.id },

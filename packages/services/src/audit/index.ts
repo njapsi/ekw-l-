@@ -13,6 +13,11 @@ export interface AuditInput {
   ip?: string;
   userAgent?: string;
   metadata?: Record<string, unknown>;
+  /** SUCCESS (default) | FAILURE | DENIED. */
+  result?: 'SUCCESS' | 'FAILURE' | 'DENIED';
+  /** Correlation id of the originating request / job. */
+  requestId?: string;
+  agentRunId?: string;
 }
 
 /**
@@ -34,9 +39,29 @@ export async function recordAudit(input: AuditInput, db: Db = prisma): Promise<v
         ip: input.ip,
         userAgent: input.userAgent,
         metadata: input.metadata as never,
+        result: input.result ?? 'SUCCESS',
+        requestId: input.requestId,
+        agentRunId: input.agentRunId,
       },
     });
   } catch (err) {
     log.error({ err, action: input.action }, 'failed to write audit log entry');
   }
 }
+
+export {
+  AUDIT_CATEGORIES,
+  auditCategory,
+  auditEventType,
+  auditLabel,
+  type AuditCategory,
+} from './catalog.js';
+export {
+  AUDIT_EXPORT_MAX_ROWS,
+  auditFilterInput,
+  exportAuditCsv,
+  listAuditActors,
+  listAuditEvents,
+  type AuditEventView,
+  type AuditFilter,
+} from './query.js';

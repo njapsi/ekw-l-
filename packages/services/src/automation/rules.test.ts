@@ -35,6 +35,11 @@ function makeDb(opts: FakeOpts = {}) {
         };
       }),
     },
+    // Phase 2: org state + AI governance lookups (live org, default policy).
+    organization: {
+      findUnique: vi.fn(async () => ({ deletedAt: null, deletionScheduledAt: null })),
+    },
+    aiGovernancePolicy: { findUnique: vi.fn(async () => null) },
     automationRule: {
       create: vi.fn(async ({ data }: any) => {
         const row = {

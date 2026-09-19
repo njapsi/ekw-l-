@@ -5,6 +5,8 @@ import type { Provider } from 'next-auth/providers';
 import Credentials from 'next-auth/providers/credentials';
 import Google from 'next-auth/providers/google';
 import Nodemailer from 'next-auth/providers/nodemailer';
+import { contextFromRequest } from './request-context.js';
+import { recordFailedLogin } from './sessions.js';
 import { checkRateLimit } from '../security/rate-limit.js';
 import { verifyAgainstDummy, verifyPassword } from './password.js';
 
@@ -133,7 +135,7 @@ export function buildProviders(): Provider[] {
         email: { label: 'Email', type: 'email' },
         password: { label: 'Password', type: 'password' },
       },
-      async authorize(raw) {
+      async authorize(raw, request) {
         const email = typeof raw?.email === 'string' ? raw.email.toLowerCase().trim() : '';
         const password = typeof raw?.password === 'string' ? raw.password : '';
         if (!email || !password) return null;
@@ -158,7 +160,14 @@ export function buildProviders(): Provider[] {
           verifyAgainstDummy(password);
           return null;
         }
-        if (!verifyPassword(password, user.passwordHash)) return null;
+        if (!verifyPassword(password, user.passwordHash)) {
+          // Security event for the account owner's login history (Part 32).
+          await recordFailedLogin(user.id, {
+            ...contextFromRequest(request),
+            reason: 'bad_password',
+          });
+          return null;
+        }
         if (!user.emailVerified) throw new EmailNotVerifiedError();
         return { id: user.id, email: user.email, name: user.name, image: user.image };
       },

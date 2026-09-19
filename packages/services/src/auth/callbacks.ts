@@ -9,6 +9,10 @@ export type TokenLike = {
   orgs?: SessionOrg[];
   isPlatformStaff?: boolean;
   sv?: number;
+  /** `UserSession` row id (not a credential — see auth/sessions.ts). */
+  sid?: string;
+  /** Epoch ms of the most recent interactive authentication. */
+  authAt?: number;
 } & Record<string, unknown>;
 
 export interface IdentitySnapshot {
@@ -48,6 +52,8 @@ export function tokenToSessionUser(token: TokenLike) {
     orgs: token.orgs ?? [],
     isPlatformStaff: token.isPlatformStaff ?? false,
     sessionVersion: token.sv ?? 0,
+    sessionId: typeof token.sid === 'string' ? token.sid : null,
+    authAt: typeof token.authAt === 'number' ? token.authAt : null,
   };
 }
 

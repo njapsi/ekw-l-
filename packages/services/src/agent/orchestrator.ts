@@ -26,6 +26,12 @@ import {
   type CapabilityResult,
   describeCapabilities,
 } from './capabilities.js';
+import {
+  type ActionClass,
+  decide as decideGovernance,
+  getGovernancePolicy,
+} from '../governance/index.js';
+import type { IntegrationKey } from '../integrations/contract.js';
 import { loadOrgContext, summarizeOrgContext, type OrgContext } from './context.js';
 import { createConversation, touchConversation } from './conversations.js';
 import { loadMemory, rememberFromTurn, summarizeMemory } from './memory.js';
@@ -36,6 +42,16 @@ import {
   GrowthAgentResponse,
   type TurnPlan,
 } from './schemas.js';
+
+/** Which integration + action class each capability exercises (governance). */
+const CAPABILITY_GOVERNANCE: Partial<
+  Record<CapabilityId, { integration: IntegrationKey; cls: ActionClass }>
+> = {
+  'youtube-analyst': { integration: 'YOUTUBE', cls: 'analyze' },
+  'youtube-monetization': { integration: 'YOUTUBE', cls: 'analyze' },
+  'tiktok-analyst': { integration: 'TIKTOK', cls: 'analyze' },
+  'seo-agent': { integration: 'WEBSITE', cls: 'analyze' },
+};
 
 const log = createLogger('agent.orchestrator');
 
@@ -235,8 +251,26 @@ export async function* streamGrowthAgentTurn(
     // Each capability only reads the shared capCtx — none depends on another's
     // result this turn — so they run concurrently instead of one at a time,
     // which otherwise serializes up to 5 AI calls (worst case ~5x latency).
+    // AI governance (ADR-0052): the org can forbid the agent from analysing
+    // a given integration at all. A blocked capability is skipped with the
+    // reason, never run.
+    const governance = await getGovernancePolicy(opts.organizationId, db);
     const capabilityResults: CapabilityResult[] = await Promise.all(
       activeCaps.map(async (cap): Promise<CapabilityResult> => {
+        const gate = CAPABILITY_GOVERNANCE[cap.id];
+        if (gate) {
+          const d = decideGovernance(governance, gate.integration, gate.cls, { viaAgent: true });
+          if (!d.allowed) {
+            return {
+              capabilityId: cap.id,
+              status: 'skipped',
+              summary: `${cap.title} was not run.`,
+              evidence: [],
+              recommendations: [],
+              note: d.reason,
+            };
+          }
+        }
         try {
           return await cap.run(capCtx);
         } catch (e) {

@@ -19,6 +19,11 @@ import { runInTransaction } from '../db-tx.js';
 import { AppError } from '../errors.js';
 import { createNotification } from '../notifications/index.js';
 import { authorize } from '../rbac/authorize.js';
+import { billingContextFromEnv } from '../billing/service.js';
+import { cancelSubscription } from '../billing/plan-change.js';
+import { disconnectConnection } from '../integrations/index.js';
+import { recordSecurityEvent } from '../security/events.js';
+import { disconnectWordPressSite } from '../wordpress/connect.js';
 
 const log = createLogger('lifecycle');
 
@@ -60,6 +65,24 @@ async function scheduleOrgDeletion(
     where: { id: organizationId },
     data: { deletionScheduledAt: purgeAt, deletionRequestedById: requestedById },
   });
+  // Phase 2 (Part 29): nothing keeps acting for an org that is being deleted.
+  // Automations and scheduled syncs already skip deletion-scheduled orgs; here
+  // pending approvals are withdrawn and a paid plan is set to lapse.
+  const approvalsCancelled = await db.integrationActionRequest.updateMany({
+    where: { organizationId, status: 'PENDING' },
+    data: { status: 'CANCELLED', error: 'Organization scheduled for deletion.' },
+  });
+  const subscription = await cancelPaidPlanForDeletion(organizationId, requestedById, db);
+  await recordSecurityEvent(
+    {
+      userId: requestedById,
+      organizationId,
+      type: 'ORG_DELETION_REQUESTED',
+      severity: 'CRITICAL',
+      metadata: { purgeAt: purgeAt.toISOString() },
+    },
+    db,
+  );
   await recordAudit(
     {
       organizationId,
@@ -67,7 +90,12 @@ async function scheduleOrgDeletion(
       action: 'organization.deletion_requested',
       targetType: 'organization',
       targetId: organizationId,
-      metadata: { purgeAt: purgeAt.toISOString(), graceDays: GRACE_DAYS },
+      metadata: {
+        purgeAt: purgeAt.toISOString(),
+        graceDays: GRACE_DAYS,
+        approvalsCancelled: approvalsCancelled.count,
+        subscription,
+      },
     },
     db,
   );
@@ -164,6 +192,10 @@ export async function purgeOrganization(organizationId: string, db: Db = prisma)
     },
     db,
   );
+  // Revoke our access at the providers before the rows (and the ciphertexts
+  // needed to revoke) disappear. Best-effort: a provider outage must not keep
+  // an organization's data alive past its grace period.
+  const upstream = await revokeUpstreamCredentials(organizationId, org.deletionRequestedById, db);
   // Cascades via the 63 `onDelete: Cascade` FKs (incl. crawl_pages / crawl_links
   // redefined in migration 20260917120000). `SetNull` FKs (audit_logs actor/org,
   // recommendations.previousReportId) are left as tombstones by design.
@@ -175,7 +207,7 @@ export async function purgeOrganization(organizationId: string, db: Db = prisma)
       action: 'organization.purged',
       targetType: 'organization',
       targetId: organizationId,
-      metadata: { name: org.name },
+      metadata: { name: org.name, upstreamRevocation: upstream },
     },
     db,
   );
@@ -235,6 +267,19 @@ export async function requestAccountDeletion(
     // set deletedAt yet — the user can sign back in during grace to cancel.
     data: { deletionScheduledAt: purgeAt, sessionVersion: { increment: 1 } },
   });
+  await db.userSession.updateMany({
+    where: { userId, revokedAt: null },
+    data: { revokedAt: new Date(), revokedReason: 'account_deletion_requested' },
+  });
+  await recordSecurityEvent(
+    {
+      userId,
+      type: 'ACCOUNT_DELETION_REQUESTED',
+      severity: 'CRITICAL',
+      metadata: { purgeAt: purgeAt.toISOString(), cascadedOrganizationIds: cascaded },
+    },
+    db,
+  );
   await recordAudit(
     {
       actorId: userId,
@@ -331,4 +376,95 @@ export async function runLifecycleSweepJob(
 
   if (orgsPurged || usersPurged) log.warn({ orgsPurged, usersPurged }, 'lifecycle sweep purged');
   return { orgsPurged, usersPurged };
+}
+
+/**
+ * If the org has a live paid subscription, set it to cancel at period end so
+ * the customer is not charged for an organization that will no longer
+ * exist. Returns what happened, for the audit trail.
+ */
+async function cancelPaidPlanForDeletion(
+  organizationId: string,
+  actorUserId: string,
+  db: Db,
+): Promise<
+  'none' | 'cancel_at_period_end' | 'already_cancelling' | 'billing_unconfigured' | 'failed'
+> {
+  const sub = await db.subscription.findUnique({
+    where: { organizationId },
+    select: { stripeSubscriptionId: true, cancelAtPeriodEnd: true, status: true },
+  });
+  if (!sub?.stripeSubscriptionId || sub.status === 'CANCELED') return 'none';
+  if (sub.cancelAtPeriodEnd) return 'already_cancelling';
+  const ctx = billingContextFromEnv();
+  if (!ctx.gateway.configured) return 'billing_unconfigured';
+  try {
+    await cancelSubscription(
+      { organizationId, userId: actorUserId },
+      { gateway: ctx.gateway, config: ctx.config, db },
+    );
+    return 'cancel_at_period_end';
+  } catch (err) {
+    log.error(
+      { organizationId, err: err instanceof Error ? err.message : String(err) },
+      'could not cancel subscription for an organization scheduled for deletion',
+    );
+    await createNotification(
+      {
+        organizationId,
+        userId: actorUserId,
+        kind: 'billing.cancel_failed',
+        level: 'CRITICAL',
+        title: 'Cancel your subscription manually',
+        body: 'This organization is scheduled for deletion, but its paid plan could not be cancelled automatically. Cancel it from Billing to avoid further charges.',
+        linkPath: '/app/billing',
+        dedupeKey: `org:${organizationId}:deletion-cancel-failed`,
+      },
+      db,
+    );
+    return 'failed';
+  }
+}
+
+async function revokeUpstreamCredentials(
+  organizationId: string,
+  actorUserId: string | null,
+  db: Db,
+): Promise<{ oauth: number; wordpress: number; failures: number }> {
+  let oauth = 0;
+  let wordpress = 0;
+  let failures = 0;
+  const conns = await db.oAuthConnection.findMany({
+    where: { organizationId, status: { not: 'REVOKED' } },
+    select: { id: true },
+  });
+  for (const c of conns) {
+    try {
+      await disconnectConnection(organizationId, c.id, actorUserId ?? 'system', db);
+      oauth += 1;
+    } catch (err) {
+      failures += 1;
+      log.warn(
+        { connectionId: c.id, err: err instanceof Error ? err.message : String(err) },
+        'upstream revoke failed',
+      );
+    }
+  }
+  const sites = await db.wordPressSite.findMany({
+    where: { organizationId, status: { not: 'REVOKED' } },
+    select: { id: true },
+  });
+  for (const site of sites) {
+    try {
+      await disconnectWordPressSite(organizationId, site.id, actorUserId ?? 'system', db);
+      wordpress += 1;
+    } catch (err) {
+      failures += 1;
+      log.warn(
+        { siteId: site.id, err: err instanceof Error ? err.message : String(err) },
+        'wordpress revoke failed',
+      );
+    }
+  }
+  return { oauth, wordpress, failures };
 }

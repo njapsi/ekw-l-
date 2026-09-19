@@ -1,39 +1,49 @@
 import type { Role } from '@growth-agent/db';
 import type { Action } from './actions.js';
+import { type Permission, ROLE_PERMISSIONS } from './permissions.js';
 
 /**
- * Role → allowed actions. Roles are cumulative in spirit but expressed
- * explicitly per role so the matrix is auditable at a glance
- * (matches docs/API.md §3).
+ * Legacy action → permission. The role matrix lives in `permissions.ts`; the
+ * older coarse `Action` names are aliases resolved through this table, so a
+ * role's legacy grants can never drift from its permission grants. The
+ * mapping preserves every pre-Phase-2 role's behaviour exactly (a test pins
+ * this).
  */
-const VIEWER: Action[] = ['org:read', 'data:read', 'report:read', 'recommendation:read'];
+export const LEGACY_ACTION_PERMISSION: Record<Action, Permission> = {
+  'org:read': 'organization.view',
+  'data:read': 'analytics.view',
+  'report:read': 'report.view',
+  'recommendation:read': 'recommendation.view',
+  'audit:read': 'audit.view',
+  'crawl:run': 'seo.analyze',
+  'agent:run': 'agent.run',
+  'content:manage': 'content.create',
+  'monetization:manage': 'monetization.manage',
+  'report:generate': 'report.create',
+  'automation:manage': 'automation.create',
+  'recommendation:approve': 'recommendation.approve',
+  'publish:external': 'content.publish',
+  'report:share': 'report.share',
+  'integration:manage': 'integration.manage',
+  'member:manage': 'member.update_role',
+  'org:update': 'organization.update',
+  'billing:manage': 'billing.manage',
+  'org:delete': 'organization.delete',
+};
 
-const MEMBER: Action[] = [
-  ...VIEWER,
-  'crawl:run',
-  'agent:run',
-  'content:manage',
-  'monetization:manage',
-  'report:generate',
-  'automation:manage',
-];
+function legacyActionsFor(role: Role): ReadonlySet<Action> {
+  return new Set(
+    (Object.keys(LEGACY_ACTION_PERMISSION) as Action[]).filter((a) =>
+      ROLE_PERMISSIONS[role].has(LEGACY_ACTION_PERMISSION[a]),
+    ),
+  );
+}
 
-const ADMIN: Action[] = [
-  ...MEMBER,
-  'recommendation:approve',
-  'publish:external',
-  'report:share',
-  'integration:manage',
-  'member:manage',
-  'org:update',
-  'audit:read',
-];
-
-const OWNER: Action[] = [...ADMIN, 'billing:manage', 'org:delete'];
-
+/** Role → legacy actions, derived from the permission matrix. */
 export const POLICY: Record<Role, ReadonlySet<Action>> = {
-  VIEWER: new Set(VIEWER),
-  MEMBER: new Set(MEMBER),
-  ADMIN: new Set(ADMIN),
-  OWNER: new Set(OWNER),
+  VIEWER: legacyActionsFor('VIEWER'),
+  MEMBER: legacyActionsFor('MEMBER'),
+  MANAGER: legacyActionsFor('MANAGER'),
+  ADMIN: legacyActionsFor('ADMIN'),
+  OWNER: legacyActionsFor('OWNER'),
 };

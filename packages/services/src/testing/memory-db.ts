@@ -52,6 +52,9 @@ function matchValue(actual: unknown, filter: unknown): boolean {
     return true;
   }
   if (filter === null) return actual === null || actual === undefined;
+  // A nested object filter against a stored nested object (a denormalised
+  // relation in a test fixture, e.g. `user: { email }`) matches field-wise.
+  if (isPlainObject(filter) && isPlainObject(actual)) return matches(actual, filter);
   return eq(actual, filter);
 }
 
@@ -78,6 +81,19 @@ export function matches(row: Row, where: Where | undefined): boolean {
     if (!matchValue(row[key], filter)) return false;
   }
   return true;
+}
+
+/** Resolve Prisma atomic number ops (`{ increment: 1 }`) against the row. */
+function applyOps(row: Row, data: Row): Row {
+  const out: Row = {};
+  for (const [k, v] of Object.entries(data)) {
+    if (isPlainObject(v) && typeof v.increment === 'number')
+      out[k] = Number(row[k] ?? 0) + v.increment;
+    else if (isPlainObject(v) && typeof v.decrement === 'number')
+      out[k] = Number(row[k] ?? 0) - v.decrement;
+    else out[k] = v;
+  }
+  return out;
 }
 
 let seq = 0;
@@ -131,16 +147,20 @@ function model(name: string, defaults: () => Row): MemoryModel {
     rows.push(row);
     return row;
   };
+  // Prisma returns fresh objects; so must we, or a later update would mutate
+  // a value the code under test already read (hiding real bugs).
+  const copy = (r: Row | undefined): Row | null => (r ? { ...r } : null);
   const m: MemoryModel = {
     rows,
-    findUnique: ({ where }) => settle(() => rows.find((r) => matches(r, where)) ?? null),
+    findUnique: ({ where }) => settle(() => copy(rows.find((r) => matches(r, where)))),
     findFirst: (args = {}) =>
-      settle(
-        () =>
+      settle(() =>
+        copy(
           sorted(
             rows.filter((r) => matches(r, args.where)),
             args.orderBy,
-          )[0] ?? null,
+          )[0],
+        ),
       ),
     findMany: (args = {}) =>
       settle(() => {
@@ -148,28 +168,28 @@ function model(name: string, defaults: () => Row): MemoryModel {
           rows.filter((r) => matches(r, args.where)),
           args.orderBy,
         );
-        return args.take ? out.slice(0, args.take) : out;
+        return (args.take ? out.slice(0, args.take) : out).map((r) => ({ ...r }));
       }),
-    create: ({ data }) => settle(() => createRow(data)),
+    create: ({ data }) => settle(() => ({ ...createRow(data) })),
     update: ({ where, data }) =>
       settle(() => {
         const row = rows.find((r) => matches(r, where));
         if (!row) throw new Error(`${name}.update: no row matches ${JSON.stringify(where)}`);
-        Object.assign(row, data, { updatedAt: new Date() });
-        return row;
+        Object.assign(row, applyOps(row, data), { updatedAt: new Date() });
+        return { ...row };
       }),
     updateMany: ({ where, data }) =>
       settle(() => {
         const hit = rows.filter((r) => matches(r, where));
-        for (const r of hit) Object.assign(r, data, { updatedAt: new Date() });
+        for (const r of hit) Object.assign(r, applyOps(r, data), { updatedAt: new Date() });
         return { count: hit.length };
       }),
     upsert: ({ where, create, update }) =>
       settle(() => {
         const row = rows.find((r) => matches(r, where));
-        if (!row) return createRow(create);
-        Object.assign(row, update, { updatedAt: new Date() });
-        return row;
+        if (!row) return { ...createRow(create) };
+        Object.assign(row, applyOps(row, update), { updatedAt: new Date() });
+        return { ...row };
       }),
     count: (args = {}) => settle(() => rows.filter((r) => matches(r, args.where)).length),
     delete: ({ where }) =>
@@ -235,6 +255,34 @@ export function createMemoryDb() {
     searchConsoleSnapshot: model('gss', () => ({})),
     notification: model('ntf', () => ({ readAt: null })),
     auditLog: model('aud', () => ({})),
+    // Phase 2 identity models.
+    aiGovernancePolicy: model('gov', () => ({})),
+    user: model('usr', () => ({
+      sessionVersion: 0,
+      deletedAt: null,
+      deactivatedAt: null,
+      passwordHash: null,
+      lastLoginAt: null,
+      lastActiveAt: null,
+    })),
+    organization: model('org', () => ({ deletedAt: null, deletionScheduledAt: null })),
+    membership: model('mbr', () => ({ status: 'ACTIVE', invitedById: null })),
+    invitation: model('inv', () => ({
+      acceptedAt: null,
+      acceptedById: null,
+      revokedAt: null,
+      lastSentAt: null,
+      sendCount: 1,
+    })),
+    userSession: model('ses', () => ({ revokedAt: null, revokedReason: null })),
+    securityEvent: model('sev', () => ({ severity: 'INFO' })),
+    apiKey: model('key', () => ({
+      lastUsedAt: null,
+      expiresAt: null,
+      revokedAt: null,
+      revokedById: null,
+    })),
+    automationRule: model('atr', () => ({})),
   };
   return db;
 }

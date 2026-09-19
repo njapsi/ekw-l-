@@ -1,4 +1,4 @@
-import { content } from '@growth-agent/services';
+import { content, security } from '@growth-agent/services';
 import type { Job } from 'bullmq';
 import { logger } from '../logger.js';
 
@@ -32,6 +32,10 @@ export async function processContentJob(job: Job<ContentJob>): Promise<unknown> 
         trigger: 'worker',
       });
     case 'generate':
+      await security.assertJobAuthorized(
+        { organizationId: data.organizationId, actorUserId: data.userId, jobId: job.id },
+        'content.create',
+      );
       return content.generateAssetsJob({
         organizationId: data.organizationId,
         userId: data.userId,

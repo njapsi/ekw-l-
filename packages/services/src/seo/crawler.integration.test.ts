@@ -7,7 +7,16 @@ import { startCrawl, addWebsite, requestCrawlCancel } from './jobs.js';
 
 const url = process.env.TEST_DATABASE_URL ?? process.env.DATABASE_URL;
 const prisma = url ? new PrismaClient({ datasources: { db: { url } } }) : null;
-let reachable = false;
+// Probe at module load (top-level await), BEFORE tests are defined: the
+// `maybe()` helper below is evaluated at collection time, so a probe inside
+// `beforeAll` came too late and every test here was silently skipped — even
+// in CI with a real database (Phase 2 finding).
+let reachable = prisma
+  ? await prisma.$queryRaw`SELECT 1`.then(
+      () => true,
+      () => false,
+    )
+  : false;
 
 beforeAll(async () => {
   if (!prisma) return;

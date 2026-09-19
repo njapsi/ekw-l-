@@ -19,7 +19,7 @@ import { runInTransaction } from '../db-tx.js';
 import { authorize } from '../rbac/authorize.js';
 import { nextRunAfter } from './cron.js';
 import { dispatchTask } from './dispatch.js';
-import { resolveOwnerAuthz } from './rules.js';
+import { automationBlockReason, resolveOwnerAuthz } from './rules.js';
 import { TASK_TYPE_META } from './schemas.js';
 
 const log = createLogger('automation.runner');
@@ -36,10 +36,15 @@ export function retryDelayMs(attempt: number): number {
 }
 
 export async function dueAutomations(now: Date, db: Db = prisma, limit = 200) {
+  // tenant-scope-ok: platform scheduler sweep across all orgs; each run then
+  // executes scoped to its own rule.organizationId.
   return db.automationRule.findMany({
     where: {
       status: { in: ['ACTIVE', 'FAILING'] },
       nextRunAt: { not: null, lte: now },
+      // An organization in its deletion grace period runs no background work
+      // (Phase 2 finding: automations previously kept running until purge).
+      organization: { deletedAt: null, deletionScheduledAt: null },
     },
     orderBy: { nextRunAt: 'asc' },
     take: limit,
@@ -48,7 +53,11 @@ export async function dueAutomations(now: Date, db: Db = prisma, limit = 200) {
 
 export async function dueRetryRuns(now: Date, db: Db = prisma, limit = 200) {
   return db.automationRun.findMany({
-    where: { status: 'RETRY_SCHEDULED', nextAttemptAt: { not: null, lte: now } },
+    where: {
+      status: 'RETRY_SCHEDULED',
+      nextAttemptAt: { not: null, lte: now },
+      organization: { deletedAt: null, deletionScheduledAt: null },
+    },
     orderBy: { nextAttemptAt: 'asc' },
     take: limit,
   });
@@ -145,10 +154,18 @@ export async function executeAutomationRun(
     }
   })();
 
-  if (!permitted) {
-    const reason = authz
-      ? `owner lacks "${requiredAction}"`
-      : 'owner is no longer a member of the organization';
+  // Organization-level guardrails, re-checked at run time: the AI governance
+  // policy may have removed this task type since the rule was created.
+  const blockReason = permitted
+    ? await automationBlockReason(rule.organizationId, rule.taskType, db)
+    : null;
+
+  if (!permitted || blockReason) {
+    const reason =
+      blockReason ??
+      (authz
+        ? `owner lacks "${requiredAction}"`
+        : 'owner is no longer a member of the organization');
     await runInTransaction(db, async (tx) => {
       await tx.automationRun.update({
         where: { id: run.id },

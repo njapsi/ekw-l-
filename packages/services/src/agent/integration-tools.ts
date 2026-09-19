@@ -22,6 +22,7 @@ import type { Db } from '@growth-agent/db';
 import { z } from 'zod';
 import { requestIntegrationAction } from '../approvals/index.js';
 import { AppError } from '../errors.js';
+import { assertGovernanceAllows } from '../governance/index.js';
 import { type ConnectionCenterEntry, getConnectionCenter } from '../integrations/center.js';
 import { INTEGRATIONS, type IntegrationKey } from '../integrations/contract.js';
 import { listWordPressContent } from '../wordpress/read.js';
@@ -155,6 +156,13 @@ const listContent: IntegrationTool<typeof ListContent> = {
     const entry = await assertCapabilityUsable(
       ctx,
       input.type === 'PAGE' ? 'wordpress.get_pages' : 'wordpress.get_posts',
+    );
+    await assertGovernanceAllows(
+      ctx.organizationId,
+      'WORDPRESS',
+      'analyze',
+      { viaAgent: true },
+      ctx.db,
     );
     const rows = await listWordPressContent(
       ctx.organizationId,

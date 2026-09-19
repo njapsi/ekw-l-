@@ -1,4 +1,4 @@
-import { seo } from '@growth-agent/services';
+import { security, seo } from '@growth-agent/services';
 import type { Job } from 'bullmq';
 import { logger } from '../logger.js';
 import { PlaywrightRenderer } from '../seo/playwright-renderer.js';
@@ -50,6 +50,10 @@ export async function processSeoJob(job: Job<SeoJob>): Promise<unknown> {
 
   switch (data.type) {
     case 'crawl.start':
+      await security.assertJobAuthorized(
+        { organizationId: data.organizationId, actorUserId: data.userId, jobId: job.id },
+        'seo.analyze',
+      );
       return seo.startCrawl(
         {
           organizationId: data.organizationId,

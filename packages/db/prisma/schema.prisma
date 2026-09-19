@@ -28,6 +28,11 @@ model User {
   passwordHash   String?
   // Bumped to invalidate all of a user's issued JWT sessions (revocation).
   sessionVersion Int       @default(0)
+  lastLoginAt    DateTime?
+  lastActiveAt   DateTime?
+  /// Self-service pause: sessions revoked, owned automations paused. Signing
+  /// in again reactivates the account.
+  deactivatedAt  DateTime?
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
   deletedAt      DateTime?
@@ -42,6 +47,9 @@ model User {
   sentInvites      Invitation[]      @relation("InvitedBy")
   oauthConnections OAuthConnection[] @relation("ConnectionCreatedBy")
   notifications    Notification[]
+  userSessions     UserSession[]
+  securityEvents   SecurityEvent[]
+  mfaFactors       UserMfaFactor[]
 
   // Set when the user requested account deletion; a grace-period purge job
   // anonymises the row after `deletionScheduledAt`. `requireUser` already
@@ -130,6 +138,9 @@ enum OrgType {
 enum Role {
   OWNER
   ADMIN
+  /// Operational lead: runs agents, manages content / SEO / automations,
+  /// reviews reports. No billing, security, member or deletion rights.
+  MANAGER
   MEMBER
   VIEWER
 }
@@ -140,13 +151,17 @@ enum MembershipStatus {
 }
 
 model Organization {
-  id        String    @id @default(cuid())
-  name      String
-  slug      String    @unique
-  type      OrgType   @default(PERSONAL)
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
-  deletedAt DateTime?
+  id            String    @id @default(cuid())
+  name          String
+  slug          String    @unique
+  type          OrgType   @default(PERSONAL)
+  /// IANA zone used for display and (later) schedules.
+  timezone      String    @default("UTC")
+  /// BCP-47 language tag for generated content and emails.
+  defaultLocale String    @default("en")
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  deletedAt     DateTime?
 
   memberships               Membership[]
   invitations               Invitation[]
@@ -194,6 +209,8 @@ model Organization {
   wordPressContent          WordPressContent[]
   integrationSyncRuns       IntegrationSyncRun[]
   integrationActions        IntegrationActionRequest[]
+  apiKeys                   ApiKey[]
+  aiGovernancePolicy        AiGovernancePolicy?
 
   // Set when an OWNER requested deletion; the org is hidden immediately and a
   // grace-period purge job hard-deletes it (cascading every tenant row) after
@@ -231,7 +248,10 @@ model Invitation {
   invitedById    String
   expiresAt      DateTime
   acceptedAt     DateTime?
+  acceptedById   String?
   revokedAt      DateTime?
+  lastSentAt     DateTime?
+  sendCount      Int       @default(1)
   createdAt      DateTime  @default(now())
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
@@ -280,6 +300,11 @@ model AuditLog {
   ip             String?
   userAgent      String?
   metadata       Json?
+  /// SUCCESS | FAILURE | DENIED. Null on rows written before Phase 2.
+  result         String?
+  /// Correlation id of the request or job that produced the event.
+  requestId      String?
+  agentRunId     String?
   createdAt      DateTime  @default(now())
 
   organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
@@ -287,6 +312,7 @@ model AuditLog {
 
   @@index([organizationId, createdAt])
   @@index([action, createdAt])
+  @@index([organizationId, actorId, createdAt])
   @@map("audit_logs")
 }
 
@@ -2129,4 +2155,129 @@ model IntegrationActionRequest {
 
   @@index([organizationId, status, createdAt])
   @@map("integration_action_requests")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 — enterprise identity (ADR-0052). Additive only.
+// ---------------------------------------------------------------------------
+
+/// Server-side record of one signed-in browser session. The JWT carries this
+/// row's id (`sid`); `requireUser` rejects a token whose row is revoked or past
+/// its absolute lifetime. That is what makes per-session sign-out real despite
+/// stateless JWTs. No token material is stored here.
+model UserSession {
+  id            String    @id @default(cuid())
+  userId        String
+  /// password | magic-link | google | dev
+  authMethod    String
+  userAgent     String?
+  /// Coarse network prefix (IPv4 /24, IPv6 /48), never the full address.
+  ipPrefix      String?
+  createdAt     DateTime  @default(now())
+  lastActiveAt  DateTime  @default(now())
+  /// Absolute lifetime cap, independent of the rolling JWT expiry.
+  expiresAt     DateTime
+  revokedAt     DateTime?
+  revokedReason String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+  @@map("user_sessions")
+}
+
+/// Security-relevant account events, separate from the org-scoped product
+/// audit log: they belong to a person, across organizations.
+model SecurityEvent {
+  id             String   @id @default(cuid())
+  userId         String?
+  organizationId String?
+  type           String
+  /// INFO | WARNING | CRITICAL
+  severity       String   @default("INFO")
+  ipPrefix       String?
+  userAgent      String?
+  metadata       Json?
+  createdAt      DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([organizationId, createdAt])
+  @@map("security_events")
+}
+
+enum MfaFactorType {
+  TOTP
+  WEBAUTHN
+  RECOVERY_CODES
+}
+
+enum MfaFactorStatus {
+  PENDING
+  ACTIVE
+  DISABLED
+}
+
+/// MFA data model (Part 14). Nothing enrolls factors yet: the settings UI
+/// shows MFA as "Coming soon" and no sign-in path consults this table. When
+/// implemented, secrets are sealed with the AES-256-GCM envelope.
+model UserMfaFactor {
+  id            String          @id @default(cuid())
+  userId        String
+  type          MfaFactorType
+  label         String?
+  status        MfaFactorStatus @default(PENDING)
+  secretCipher  String?         @db.Text
+  secretIv      String?
+  secretAuthTag String?
+  keyId         String?
+  /// WebAuthn credential id (public), unique per authenticator.
+  credentialId  String?         @unique
+  publicKey     String?         @db.Text
+  signCount     Int?
+  createdAt     DateTime        @default(now())
+  lastUsedAt    DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("user_mfa_factors")
+}
+
+/// Organization API keys. The secret is shown once; only its SHA-256 is kept.
+model ApiKey {
+  id             String    @id @default(cuid())
+  organizationId String
+  name           String
+  /// Public lookup handle embedded in the key (`ga_<prefix>_<secret>`).
+  prefix         String    @unique
+  secretHash     String
+  scopes         String[]
+  createdById    String
+  createdAt      DateTime  @default(now())
+  lastUsedAt     DateTime?
+  expiresAt      DateTime?
+  revokedAt      DateTime?
+  revokedById    String?
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@map("api_keys")
+}
+
+/// Per-organization AI governance policy (Part 26). Validated by the Zod
+/// schema in `packages/services/src/governance`; no row means defaults.
+model AiGovernancePolicy {
+  id             String   @id @default(cuid())
+  organizationId String   @unique
+  policy         Json
+  updatedById    String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@map("ai_governance_policies")
 }

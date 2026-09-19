@@ -31,9 +31,12 @@ import {
 } from '../integrations/contract.js';
 import { createNotification } from '../notifications/index.js';
 import { scrubSecrets } from '../observability/scrub.js';
+import { actionClassForLevel, assertGovernanceAllows } from '../governance/index.js';
 import {
+  CreateDraftPayload,
   PublishPostPayload,
   UpdatePostPayload,
+  createDraft,
   executePublishPost,
   executeUpdatePost,
 } from '../wordpress/actions.js';
@@ -78,6 +81,19 @@ async function wordPressConnection(organizationId: string, connectionRef: string
  * (TikTok publishing keeps its own pre-existing approval flow — ADR-0017.)
  */
 const EXECUTORS: Record<string, Executor> = {
+  // A draft is DRAFT-level and normally runs directly; it is listed so an
+  // organization whose governance policy requires approval for AI drafts can
+  // route agent-proposed drafts through this queue.
+  'wordpress.create_draft': {
+    integration: 'WORDPRESS',
+    schema: CreateDraftPayload,
+    connection: wordPressConnection,
+    execute: (c, p) =>
+      createDraft(
+        { organizationId: c.organizationId, siteId: c.connectionRef, actorId: c.actorId, db: c.db },
+        p,
+      ),
+  },
   'wordpress.update_post': {
     integration: 'WORDPRESS',
     schema: UpdatePostPayload,
@@ -159,7 +175,17 @@ export async function requestIntegrationAction(input: RequestActionInput, db: Db
     throw AppError.validation(`"${input.capabilityId}" is not an action Growth Agent can perform.`);
   }
   const cap = capabilityFor(executor, input.capabilityId);
-  if (!requiresApproval(cap.level)) {
+  // AI governance (ADR-0052): a disabled action class cannot even be
+  // requested, and the org may require approval for classes (e.g. drafts)
+  // that the capability floor alone would let run directly.
+  const governance = await assertGovernanceAllows(
+    input.organizationId,
+    executor.integration,
+    actionClassForLevel(cap.level),
+    { viaAgent: input.source === 'AGENT' },
+    db,
+  );
+  if (!requiresApproval(cap.level) && !governance.requiresApproval) {
     throw AppError.validation(`${cap.label} does not need approval; run it directly.`);
   }
   const payload = parsePayload(executor.schema, input.payload);
@@ -295,6 +321,14 @@ export async function decideActionRequest(
     const cap = capabilityFor(executor, row.capabilityId);
     // Re-check at execution time: permissions may have changed since the request.
     await assertCapabilityUsable(executor, cap, row.organizationId, row.connectionRef, db);
+    // …and the governance policy may have been tightened since.
+    await assertGovernanceAllows(
+      row.organizationId,
+      executor.integration,
+      actionClassForLevel(cap.level),
+      { viaAgent: row.source === 'AGENT' },
+      db,
+    );
     const payload = parsePayload(executor.schema, row.payload);
     const result = await executor.execute(
       {

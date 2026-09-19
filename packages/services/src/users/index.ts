@@ -73,3 +73,10 @@ export async function setPreference(userId: string, key: string, value: unknown)
     create: { userId, key, value: value as never },
   });
 }
+
+export {
+  changePassword,
+  deactivateAccount,
+  exportUserData,
+  passwordPolicyError,
+} from './account.js';

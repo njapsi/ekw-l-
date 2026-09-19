@@ -2,6 +2,7 @@ import { type Db, prisma } from '@growth-agent/db';
 import { z } from 'zod';
 import { recordAudit } from '../audit/index.js';
 import { AppError } from '../errors.js';
+import { assertGovernanceAllows } from '../governance/index.js';
 import type { WordPressClientOptions, WpContentKind } from './client.js';
 import { clientForSite, explainWordPressError, requireWordPressSite } from './connect.js';
 
@@ -78,6 +79,8 @@ export async function createDraft(ctx: Ctx, raw: unknown) {
   const db = ctx.db ?? prisma;
   const payload = validate(CreateDraftPayload, raw);
   const site = await requireWordPressSite(ctx.organizationId, ctx.siteId, db);
+  // An org can switch WordPress drafting off entirely (AI governance).
+  await assertGovernanceAllows(ctx.organizationId, 'WORDPRESS', 'draft', { viaAgent: false }, db);
   need(site.detectedCapabilities, editCap(payload.kind), 'create drafts');
   try {
     const post = await clientForSite(site, ctx.clientOpts).createPost(payload.kind, {

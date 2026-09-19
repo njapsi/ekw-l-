@@ -76,6 +76,11 @@ function makeDb(rule: RuleSeed = {}, run: { status?: string; attempt?: number } 
         return row;
       }),
     },
+    // Phase 2: org state + AI governance lookups (live org, default policy).
+    organization: {
+      findUnique: vi.fn(async () => ({ deletedAt: null, deletionScheduledAt: null })),
+    },
+    aiGovernancePolicy: { findUnique: vi.fn(async () => null) },
     automationRule: {
       findUnique: vi.fn(async ({ where }: any) => (where.id === ruleRow.id ? ruleRow : null)),
       update: vi.fn(async ({ data }: any) => {

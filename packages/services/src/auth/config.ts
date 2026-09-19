@@ -6,6 +6,8 @@ import { recordAudit } from '../audit/index.js';
 import { ensurePersonalOrganization } from '../organizations/index.js';
 import { checkRateLimit } from '../security/rate-limit.js';
 import { applyIdentityToToken, tokenToSessionUser } from './callbacks.js';
+import { currentRequestContext } from './request-context.js';
+import { authMethodFor, createUserSession, endSession } from './sessions.js';
 import { edgeAuthConfig } from './config.edge.js';
 import { buildProviders } from './providers.js';
 import type { IdentitySnapshot, TokenLike } from './callbacks.js';
@@ -74,7 +76,7 @@ export const authConfig: NextAuthConfig = {
       }
       return true;
     },
-    async jwt({ token, user, trigger }) {
+    async jwt({ token, user, trigger, account }) {
       if (user?.id) {
         // Fresh sign-in: make sure the user has at least a personal org.
         await ensurePersonalOrganization({
@@ -82,6 +84,16 @@ export const authConfig: NextAuthConfig = {
           name: user.name ?? null,
           email: user.email ?? '',
         });
+        // Register a server-side session (Phase 2): the JWT carries its id,
+        // and `requireUser` revokes the token when the row is revoked.
+        const ctx = currentRequestContext();
+        const { sessionId } = await createUserSession({
+          userId: user.id,
+          authMethod: authMethodFor(account?.provider),
+          ...ctx,
+        });
+        (token as TokenLike).sid = sessionId;
+        (token as TokenLike).authAt = Date.now();
       }
       if (user?.id || trigger === 'update') {
         const uid = user?.id ?? (token as TokenLike).uid;
@@ -112,6 +124,8 @@ export const authConfig: NextAuthConfig = {
     async signOut(message) {
       const raw = 'token' in message ? message.token?.uid : undefined;
       const userId = typeof raw === 'string' ? raw : undefined;
+      const sid = 'token' in message ? message.token?.sid : undefined;
+      if (userId && typeof sid === 'string') await endSession(userId, sid);
       if (userId) {
         await recordAudit({
           actorId: userId,

@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { Menu, X } from 'lucide-react';
 import { Button, cn } from '@growth-agent/ui';
-import { APP_NAV } from './nav';
+import { APP_NAV_GROUPS, activeNavHref } from './nav';
 import { NotificationBell } from './notification-bell';
 import { OrgSwitcher, type OrgOption } from './org-switcher';
 import { UserMenu } from './user-menu';
@@ -20,30 +20,40 @@ export interface AppShellProps {
 export function AppShell({ user, organizations, activeOrgId, children }: AppShellProps) {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const activeHref = activeNavHref(pathname);
 
   const navList = (
-    <nav className="flex flex-col gap-1 p-3">
-      {APP_NAV.map((item) => {
-        const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
-        const Icon = item.icon;
-        return (
-          <Link
-            key={item.href}
-            href={item.href}
-            onClick={() => setMobileOpen(false)}
-            aria-current={active ? 'page' : undefined}
-            className={cn(
-              'flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors',
-              active
-                ? 'bg-accent text-accent-foreground font-medium'
-                : 'text-muted-foreground hover:bg-muted hover:text-foreground',
-            )}
-          >
-            <Icon className="size-4 shrink-0" />
-            {item.label}
-          </Link>
-        );
-      })}
+    <nav className="flex flex-col gap-4 p-3" aria-label="Main">
+      {APP_NAV_GROUPS.map((group) => (
+        <div key={group.label ?? 'top'} className="flex flex-col gap-1">
+          {group.label ? (
+            <p className="text-muted-foreground px-3 pb-1 text-xs font-medium uppercase tracking-wide">
+              {group.label}
+            </p>
+          ) : null}
+          {group.items.map((item) => {
+            const active = item.href === activeHref;
+            const Icon = item.icon;
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                onClick={() => setMobileOpen(false)}
+                aria-current={active ? 'page' : undefined}
+                className={cn(
+                  'flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors',
+                  active
+                    ? 'bg-accent text-accent-foreground font-medium'
+                    : 'text-muted-foreground hover:bg-muted hover:text-foreground',
+                )}
+              >
+                <Icon className="size-4 shrink-0" />
+                {item.label}
+              </Link>
+            );
+          })}
+        </div>
+      ))}
       {user.isPlatformStaff ? (
         <Link
           href="/admin"
@@ -107,7 +117,9 @@ export function AppShell({ user, organizations, activeOrgId, children }: AppShel
           </div>
         ) : null}
 
-        <main className="min-w-0 flex-1 px-4 py-6 sm:px-6 lg:px-8">
+        {/* Keyed by org: switching organizations remounts every client
+            component, so no client-side state from the previous org survives. */}
+        <main key={activeOrgId} className="min-w-0 flex-1 px-4 py-6 sm:px-6 lg:px-8">
           <div className="mx-auto max-w-5xl space-y-6">{children}</div>
         </main>
       </div>

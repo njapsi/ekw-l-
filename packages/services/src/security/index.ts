@@ -4,3 +4,5 @@
  */
 export * from './rate-limit.js';
 export * from './untrusted.js';
+export * from './events.js';
+export * from './job-auth.js';

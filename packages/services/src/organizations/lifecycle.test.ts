@@ -50,6 +50,13 @@ function fakeDb(over: Partial<Record<string, unknown>> = {}) {
       ),
       findMany: vi.fn(async () => state.ownerMemberships),
     },
+    // Phase 2 deletion handling: pending approvals, paid plan, upstream creds.
+    integrationActionRequest: { updateMany: vi.fn(async () => ({ count: 0 })) },
+    subscription: { findUnique: vi.fn(async () => null) },
+    oAuthConnection: { findMany: vi.fn(async () => []) },
+    wordPressSite: { findMany: vi.fn(async () => []) },
+    securityEvent: { create: vi.fn(async () => ({})) },
+    userSession: { updateMany: vi.fn(async () => ({ count: 0 })) },
     user: {
       findUnique: vi.fn(async () => state.user),
       update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {

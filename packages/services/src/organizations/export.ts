@@ -34,6 +34,12 @@ export interface OrganizationExport {
   };
   notifications: unknown;
   auditLog: unknown;
+  /** Phase 1–2 additions (credentials and secret hashes never included). */
+  wordpress: { sites: unknown; content: unknown };
+  integrationSyncRuns: unknown;
+  approvals: unknown;
+  apiKeys: unknown;
+  aiGovernancePolicy: unknown;
 }
 
 export async function exportOrganizationData(
@@ -80,7 +86,20 @@ export async function exportOrganizationData(
       where,
       include: { user: { select: { id: true, email: true, name: true } } },
     }),
-    db.invitation.findMany({ where }),
+    db.invitation.findMany({
+      where,
+      // The token hash is a credential equivalent for an open invitation.
+      select: {
+        id: true,
+        email: true,
+        role: true,
+        invitedById: true,
+        expiresAt: true,
+        acceptedAt: true,
+        revokedAt: true,
+        createdAt: true,
+      },
+    }),
     db.oAuthConnection.findMany({
       where,
       // Never export the encrypted token material.
@@ -123,6 +142,40 @@ export async function exportOrganizationData(
     db.notification.findMany({ where, take: CAP }),
     db.auditLog.findMany({ where, take: CAP, orderBy: { createdAt: 'desc' } }),
   ]);
+  const [wpSites, wpContent, syncRuns, approvals, keys, governance] = await Promise.all([
+    db.wordPressSite.findMany({
+      where,
+      // Never the application-password ciphertext.
+      select: {
+        id: true,
+        siteUrl: true,
+        siteName: true,
+        username: true,
+        status: true,
+        detectedCapabilities: true,
+        createdAt: true,
+      },
+    }),
+    db.wordPressContent.findMany({ where, take: CAP }),
+    db.integrationSyncRun.findMany({ where, take: CAP, orderBy: { startedAt: 'desc' } }),
+    db.integrationActionRequest.findMany({ where, take: CAP, orderBy: { createdAt: 'desc' } }),
+    db.apiKey.findMany({
+      where,
+      // Never the secret hash.
+      select: {
+        id: true,
+        name: true,
+        prefix: true,
+        scopes: true,
+        createdById: true,
+        createdAt: true,
+        lastUsedAt: true,
+        expiresAt: true,
+        revokedAt: true,
+      },
+    }),
+    db.aiGovernancePolicy.findUnique({ where: { organizationId } }),
+  ]);
 
   return {
     exportedAt: new Date().toISOString(),
@@ -145,6 +198,11 @@ export async function exportOrganizationData(
     billing: { subscription, entitlements, invoices, usageRecords },
     notifications,
     auditLog,
+    wordpress: { sites: wpSites, content: wpContent },
+    integrationSyncRuns: syncRuns,
+    approvals,
+    apiKeys: keys,
+    aiGovernancePolicy: governance,
   };
 }
 

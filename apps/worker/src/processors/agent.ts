@@ -1,4 +1,4 @@
-import { agent } from '@growth-agent/services';
+import { agent, security } from '@growth-agent/services';
 import type { Job } from 'bullmq';
 import { logger } from '../logger.js';
 
@@ -19,6 +19,11 @@ export async function processAgentJob(job: Job<AgentJob>): Promise<unknown> {
   const data = job.data;
   logger.info({ jobId: job.id, type: data.type }, 'agent job');
   if (data.type === 'turn') {
+    // Re-derive authorization now, from the database (Phase 2, Part 22).
+    await security.assertJobAuthorized(
+      { organizationId: data.organizationId, actorUserId: data.userId, jobId: job.id },
+      'agent.run',
+    );
     const res = await agent.runGrowthAgentTurnJob({
       organizationId: data.organizationId,
       userId: data.userId,

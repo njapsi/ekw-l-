@@ -1,4 +1,4 @@
-import { reports } from '@growth-agent/services';
+import { reports, security } from '@growth-agent/services';
 import type { Job } from 'bullmq';
 import { logger } from '../logger.js';
 
@@ -29,6 +29,10 @@ export async function processReportJob(job: Job<ReportJob>): Promise<unknown> {
 
   switch (data.type) {
     case 'generate':
+      await security.assertJobAuthorized(
+        { organizationId: data.organizationId, actorUserId: data.userId, jobId: job.id },
+        'report.create',
+      );
       return reports.generateReportJob({
         organizationId: data.organizationId,
         userId: data.userId,

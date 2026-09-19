@@ -35,7 +35,12 @@ export function OrgSwitcher({
   function select(id: string) {
     if (id === activeOrgId) return;
     startTransition(async () => {
-      await switchOrgAction(id);
+      const res = await switchOrgAction(id);
+      if (!res.ok) return;
+      // Land on the dashboard rather than staying on a page (a conversation, a
+      // report) that belongs to the previous organization, then refresh so
+      // every server component re-reads with the new org.
+      router.push('/app/dashboard');
       router.refresh();
     });
   }
@@ -63,7 +68,7 @@ export function OrgSwitcher({
           </DropdownMenuItem>
         ))}
         <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => router.push('/app/onboarding')}>
+        <DropdownMenuItem onSelect={() => router.push('/onboarding?new=1')}>
           Create organization
         </DropdownMenuItem>
       </DropdownMenuContent>

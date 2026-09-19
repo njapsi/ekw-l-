@@ -26,6 +26,11 @@ function makeDb() {
     runs,
     audits,
     membership: { findUnique: vi.fn(async () => ({ role: 'MEMBER', status: 'ACTIVE' })) },
+    // Phase 2: org state + AI governance lookups (live org, default policy).
+    organization: {
+      findUnique: vi.fn(async () => ({ deletedAt: null, deletionScheduledAt: null })),
+    },
+    aiGovernancePolicy: { findUnique: vi.fn(async () => null) },
     automationRule: {
       findMany: vi.fn(async ({ where }: any) =>
         rules.filter((r) => {

@@ -18,6 +18,10 @@ export interface AppSessionUser {
   isPlatformStaff: boolean;
   /** Matches `User.sessionVersion` at issue time; used for revocation. */
   sessionVersion: number;
+  /** `UserSession` id — null only for tokens issued before session tracking. */
+  sessionId: string | null;
+  /** Epoch ms of the last interactive sign-in (for "recent authentication"). */
+  authAt: number | null;
 }
 
 declare module 'next-auth' {
@@ -34,4 +38,6 @@ export interface AppJwtClaims {
   orgs?: SessionOrg[];
   isPlatformStaff?: boolean;
   sv?: number;
+  sid?: string;
+  authAt?: number;
 }
