@@ -6,6 +6,111 @@ reversal gets a new ADR that supersedes the old one.
 
 ---
 
+## ADR-0054 — Agent runtime: durable event timeline, checkpoint cancellation, a formal tool registry, real (but unwired) tool-calling, and a usage-metering fix
+
+**Context.** Phase 4 asked for a "core AI Agent Runtime" — multi-step tool
+loops, tool authorization, a durable timeline, human-in-the-loop approval,
+cancellation, retries, background execution, provider abstraction, and MCP
+readiness. Its own first rule was "audit before coding." That audit
+(`docs/PHASE-4-REPORT.md` §1) found most of this brief already implemented
+under different names in prior phases: a real orchestrator loop
+(`orchestrator.ts`), a mature approval system with exactly-once execution
+and payload replay rather than model reinterpretation
+(`IntegrationActionRequest`), governance-based risk gating that structurally
+cannot express an unsafe policy, and prompt-injection defenses already
+red-teamed. The genuine gaps were narrower: no durable per-step event log
+(only a final JSON blob), no way to cancel an interactive chat turn, a
+`ToolDefinition` type in `packages/ai` defined but never wired to anything,
+the existing closed tool allowlist never connected to real model
+tool-calling, sub-agent AI costs invisible to org billing, a hardcoded
+approval TTL, and no dry-run mode.
+
+**Decision.**
+
+1. **Extend, don't rebuild, the orchestrator.** `AgentRun` gained additive
+   columns (`userId`, `conversationId`, `currentStep`, `iterationCount`,
+   `toolCallCount`, `errorCode`, `metadata`, `cancelledAt`, `updatedAt`) and
+   two new status values (`PAUSED`, `TIMED_OUT`, both reserved for future
+   use). A new `AgentRunEvent` table gives the brief's requested durable
+   timeline, written at every real stage transition the orchestrator
+   already has, metadata scrubbed exactly like model output.
+2. **Cancellation is checkpoint-based, not a mid-call abort**, except for
+   the orchestrator's own two direct model calls (synthesis, response
+   writing), which do get a real `AbortSignal` via `packages/ai`'s
+   pre-existing `signal` option. A capability already running when Stop is
+   clicked finishes; the turn simply doesn't advance to the next stage.
+   This satisfies "never terminate halfway through a critical database
+   transaction" without threading an abort signal through every specialist
+   analyst — a much larger, higher-risk change for a narrower benefit.
+3. **The Tool Registry catalogues, it does not reimplement**, the existing
+   closed `integration-tools.ts` allowlist, adding the risk/category/
+   provider-type metadata shape the brief asks for. Authorization is
+   unchanged — still inside each tool's own `execute`.
+4. **Real tool-calling was built in `packages/ai` but deliberately not
+   wired into any live orchestrator capability.** The dead `ToolDefinition`
+   type now does something — `GenerateTextOptions.tools`/`maxSteps` map to
+   the Vercel AI SDK's real multi-step tool-calling loop, tested. Wiring it
+   into the live `growth-agent` path would be the single highest-risk
+   change available this phase, changing actual runtime behavior of a
+   mature, security-audited system, for a narrow 4-tool surface. Given the
+   brief's repeated "do not overbuild," shipping the tested primitive
+   without touching the live loop was judged the safer, still-genuine
+   progress — and is now the clearest next slice for a future phase.
+5. **Approval TTL becomes an org-configurable governance field**
+   (`approvalTtlMinutes`, default 10,080 = the previous hardcoded 7 days,
+   `.default()` so old stored policies still parse), not a per-risk-class
+   schedule — a disclosed scope reduction from the brief's 15-min/1-hour/
+   24-hour example.
+6. **Dry-run mode (`AGENT_DRY_RUN`) sits after authorization checks, before
+   the network call**, in the three WordPress executors — a denied
+   capability still throws in dry-run; only the actual external write is
+   skipped.
+7. **The usage-metering gap is fixed at the sink, not by restructuring
+   `AgentRun`'s display columns.** Every model call in a turn now reports
+   to the org's billing meters via a real `UsageSink`; the top-level
+   `AgentRun`'s displayed cost still reflects only its own synthesis call
+   (a cosmetic, disclosed limitation) — billing correctness was prioritized
+   over display completeness.
+8. **No Temporal, no background-queue activation.** Per the brief's own
+   instruction, Temporal is not added merely for architectural fashion; the
+   existing Agent Runtime → Orchestrator → Worker → Tool Activities
+   boundary already matches its own suggested shape, documented for a
+   future adoption. The worker's `agent-run` BullMQ queue, found to be
+   fully built but never enqueued to (dead infrastructure), was left
+   inactive rather than wired to a synthetic trigger — activating it needs
+   a real background-run product surface that doesn't exist yet.
+
+**Alternatives considered.**
+
+- _Rewrite the orchestrator around model-driven multi-step tool-calling
+  end-to-end:_ rejected — the brief explicitly warns against overbuilding,
+  and the existing deterministic capability-function-call design is already
+  safer than a live tool-calling loop for the analysis use cases it serves.
+- _A true mid-flight abort signal threaded through every capability:_
+  rejected for this phase — checkpoint cancellation bounds the worst case
+  (one more capability batch) at a fraction of the risk and code churn.
+- _Per-risk-class approval TTLs:_ rejected as unnecessary complexity before
+  any organization has asked for more than one number.
+- _Activating the dead `agent-run` queue with a synthetic trigger just to
+  prove it works:_ rejected — it would exercise infrastructure without
+  serving a real user need, and risks masking the actual gap (no
+  background-run UX exists) behind a hollow "it's wired now" claim.
+
+**Consequences.**
+
+- Migration `20260923120000_agent_runtime`, additive only; verified against
+  a real, isolated staging-Postgres schema (never the live app), including
+  a direct query confirming a real turn writes the exact expected 12-event
+  causal sequence and that cancellation flips status atomically.
+- `docs/AGENTS.md`'s "tool-calling is not model-driven anywhere" claim is
+  now more precise: the infrastructure exists, nothing live uses it —
+  future phases must revisit that doc and `docs/AI-SECURITY-AUDIT.md`'s
+  tool-manipulation row together before wiring a capability to it.
+- Full results, gate status, and the phase's honest scope accounting are in
+  `docs/PHASE-4-REPORT.md` and `docs/AGENT-RUNTIME.md`.
+
+---
+
 ## ADR-0053 — Design-system-first UI redesign; dark mode fixed at the token layer; Missions as a read model, not a new entity
 
 **Context.** Phase 3 asked for an enterprise-grade UI/UX overhaul across

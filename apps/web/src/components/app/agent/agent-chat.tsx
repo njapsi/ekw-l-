@@ -43,8 +43,24 @@ export function AgentChat({
   const [timeline, setTimeline] = useState<AgentTimelineStep[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [stopping, setStopping] = useState(false);
   const convoRef = useRef(conversationId);
+  const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  async function stop() {
+    if (!activeRunId || stopping) return;
+    setStopping(true);
+    try {
+      await fetch(`/api/agent/runs/${activeRunId}/cancel`, { method: 'POST' });
+    } catch {
+      /* the local abort below still stops the client from waiting further */
+    } finally {
+      abortRef.current?.abort();
+      setStopping(false);
+    }
+  }
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -69,12 +85,16 @@ export function AgentChat({
       { id: asstId, role: 'ASSISTANT', content: '', blocks: null, streaming: true },
     ]);
     setTimeline([{ id: 'start', label: 'Starting…', status: 'active' }]);
+    setActiveRunId(null);
+    const controller = new AbortController();
+    abortRef.current = controller;
 
     try {
       const res = await fetch('/api/agent/stream', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ message, conversationId: convoRef.current }),
+        signal: controller.signal,
       });
       if (!res.ok || !res.body) {
         const j = (await res.json().catch(() => null)) as { error?: string } | null;
@@ -95,6 +115,7 @@ export function AgentChat({
           const line = frame.split('\n').find((l) => l.startsWith('data: '));
           if (!line) continue;
           const ev = JSON.parse(line.slice(6)) as
+            | { type: 'run_created'; agentRunId: string; conversationId: string }
             | { type: 'status'; stage: string; detail?: string }
             | { type: 'token'; text: string }
             | {
@@ -104,9 +125,12 @@ export function AgentChat({
                 title: string;
                 blocks: AgentBlocks;
               }
-            | { type: 'error'; message: string };
+            | { type: 'error'; message: string }
+            | { type: 'cancelled'; agentRunId: string };
 
-          if (ev.type === 'status') {
+          if (ev.type === 'run_created') {
+            setActiveRunId(ev.agentRunId);
+          } else if (ev.type === 'status') {
             // 'running' fires once per specialist capability with a real,
             // distinct detail (e.g. "Running SEO Auditor") — each becomes its
             // own step rather than overwriting the last, since several can
@@ -141,6 +165,8 @@ export function AgentChat({
               t.map((s) => (s.status === 'active' ? { ...s, status: 'error' as const } : s)),
             );
             setMessages((m) => m.filter((x) => x.id !== asstId));
+          } else if (ev.type === 'cancelled') {
+            setMessages((m) => m.filter((x) => x.id !== asstId));
           }
         }
       }
@@ -153,11 +179,17 @@ export function AgentChat({
         router.refresh();
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'The agent hit an error.');
+      // A user-initiated Stop aborts this fetch client-side — that is
+      // success, not a failure to surface.
+      if (!(e instanceof DOMException && e.name === 'AbortError')) {
+        setError(e instanceof Error ? e.message : 'The agent hit an error.');
+      }
       setMessages((m) => m.filter((x) => x.id !== asstId));
     } finally {
       setBusy(false);
       setTimeline([]);
+      setActiveRunId(null);
+      abortRef.current = null;
     }
   }
 
@@ -239,9 +271,15 @@ export function AgentChat({
           disabled={busy}
           autoFocus
         />
-        <Button type="submit" disabled={busy || !input.trim()}>
-          {busy ? 'Working…' : 'Send'}
-        </Button>
+        {busy ? (
+          <Button type="button" variant="outline" onClick={() => void stop()} disabled={stopping}>
+            {stopping ? 'Stopping…' : 'Stop'}
+          </Button>
+        ) : (
+          <Button type="submit" disabled={!input.trim()}>
+            Send
+          </Button>
+        )}
       </form>
     </div>
   );

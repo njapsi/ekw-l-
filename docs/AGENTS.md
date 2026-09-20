@@ -101,17 +101,31 @@ through their own feature's explicit-approval Server Action, not an agent.
 rejects `seo.delete_site` / `seo.update_page` / an injected `DROP TABLE` name and
 that a foreign `organizationId` in tool input is ignored.
 
-**Tool-calling is not model-driven anywhere in this codebase** (verified
-Phase 25, `docs/AI-SECURITY-AUDIT.md`): `generateWithTools` — the AI SDK's
-native tool-calling loop, where a model decides at runtime which tool to
-invoke and with what arguments — remains "planned, not implemented." Every
-`seo.*`/`gsc.*` call above is made by **our own code**, before any prompt is
-built, to assemble a fact sheet; the model only ever returns a
-schema-validated JSON object at the end. This is the structural reason "tool
-manipulation" isn't a live attack surface today — there is no runtime
-function-calling decision for an injection to redirect. If a future phase
-adds real model-driven tool-calling, this section and the "tool manipulation"
-row in `docs/AI-SECURITY-AUDIT.md` must be revisited together.
+**Tool-calling infrastructure exists (Phase 4) but nothing in the live
+orchestrator path uses it yet** — this is a narrower, more precise claim than
+Phases 22/25's "not implemented," and the distinction matters for the
+security conclusion below. `packages/ai`'s `AIProvider.generateText`/
+`streamText` now accept a real `tools`/`maxSteps` option, wired through to
+the Vercel AI SDK's native multi-step tool-calling loop
+(`packages/ai/src/providers/vercel.ts`), and
+`packages/services/src/agent/tool-registry.ts` packages the existing closed
+`integration-tools.ts` allowlist (4 tools) into that shape with risk/category
+metadata. **No orchestrator capability calls either of these today** — every
+`seo.*`/`gsc.*` call and every `growth-agent` capability is still made by
+**our own code**, before any prompt is built, exactly as before. This is
+still the structural reason "tool manipulation" isn't a live attack surface:
+there is no runtime function-calling decision in the live path for an
+injection to redirect. See `docs/AGENT-RUNTIME.md` for the full Phase 4
+architecture, including exactly why wiring this into a live capability was
+deliberately deferred rather than rushed into the same phase that built the
+primitive. **The next phase that wires a capability to real tool-calling
+must revisit this section and the "tool manipulation" row in
+`docs/AI-SECURITY-AUDIT.md` together** — the closed 4-tool allowlist
+(`integrations.list_connections`, `integrations.get_capabilities`,
+`wordpress.list_content`, `integrations.propose_action`) is already
+authorization-checked per call and was already covered by Phase 22/25's
+adversarial tests as a registry, so revisiting is expected to be
+confirmatory, not a new audit from zero — but it must still happen.
 
 ## Untrusted-content fencing (Phase 22, extended Phase 25)
 

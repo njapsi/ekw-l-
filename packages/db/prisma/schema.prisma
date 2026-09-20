@@ -523,36 +523,115 @@ enum AgentRunStatus {
   QUEUED
   RUNNING
   NEEDS_APPROVAL
+  /// Phase 4: an in-progress run explicitly suspended (distinct from
+  /// NEEDS_APPROVAL, which is a specific wait reason automation/UI already
+  /// key off of — PAUSED is reserved for a future generic suspend/resume).
+  PAUSED
   COMPLETED
   FAILED
   CANCELLED
+  /// Phase 4: exceeded MAX_RUNTIME before completing.
+  TIMED_OUT
+}
+
+/// Phase 4 — durable per-step timeline for an AgentRun, independent of the
+/// live SSE stream (which is ephemeral and not persisted). Every event a
+/// current turn can actually emit is listed; a few from the original design
+/// vocabulary (USER_INPUT_REQUESTED/RECEIVED, RETRY_STARTED, RUN_PAUSED/
+/// RESUMED) are kept for forward compatibility but nothing emits them yet —
+/// documented in docs/AGENT-RUNTIME.md rather than emitted speculatively.
+enum AgentRunEventType {
+  RUN_CREATED
+  RUN_STARTED
+  CONTEXT_LOADED
+  PLAN_CREATED
+  MODEL_CALLED
+  MODEL_RESPONSE
+  TOOL_SELECTED
+  TOOL_AUTHORIZATION_CHECK
+  TOOL_STARTED
+  TOOL_COMPLETED
+  TOOL_FAILED
+  APPROVAL_REQUESTED
+  APPROVAL_GRANTED
+  APPROVAL_REJECTED
+  USER_INPUT_REQUESTED
+  USER_INPUT_RECEIVED
+  MEMORY_UPDATED
+  RETRY_STARTED
+  RUN_PAUSED
+  RUN_RESUMED
+  RUN_COMPLETED
+  RUN_FAILED
+  RUN_CANCELLED
 }
 
 model AgentRun {
   id               String         @id @default(cuid())
   organizationId   String
+  /// The member whose turn this is; null for a system/automation-triggered
+  /// run that has no acting user.
+  userId           String?
+  /// Direct link for querying a conversation's runs without going through
+  /// AIMessage; nullable for non-conversational agent runs (e.g. an
+  /// automation-triggered analyst run).
+  conversationId   String?
   agent            String
   status           AgentRunStatus @default(QUEUED)
   trigger          String?
   input            Json
   output           Json?
   error            String?
+  /// Structured error code (Phase 4 §32 — AI_PROVIDER_ERROR, TOOL_TIMEOUT, …),
+  /// set alongside the user-safe `error` message.
+  errorCode        String?
+  /// The current stage label (e.g. "planning", "running:seo-agent") — a
+  /// cheap way to see where a still-RUNNING run actually is without reading
+  /// its event history.
+  currentStep      String?
+  iterationCount   Int            @default(0)
+  toolCallCount    Int            @default(0)
   tokensPrompt     Int            @default(0)
   tokensCompletion Int            @default(0)
   costUsd          Decimal        @default(0) @db.Decimal(14, 6)
   model            String?
   provider         String?
+  /// Free-form, secret-scrubbed structured detail beyond the fixed columns
+  /// (e.g. cancellation reason, dry-run flag).
+  metadata         Json?
   startedAt        DateTime?
   finishedAt       DateTime?
+  cancelledAt      DateTime?
   createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
 
-  organization    Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organization    Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   recommendations Recommendation[]
   contentIdeas    ContentIdea[]
   aiMessages      AIMessage[]
+  events          AgentRunEvent[]
 
   @@index([organizationId, agent, createdAt])
+  @@index([organizationId, conversationId])
   @@map("agent_runs")
+}
+
+/// Phase 4 — one row per AgentRunEventType transition. Metadata is always
+/// run through the same secret scrubber used for model output before it is
+/// written (never an OAuth token, refresh token, password or API key).
+model AgentRunEvent {
+  id             String            @id @default(cuid())
+  agentRunId     String
+  organizationId String
+  type           AgentRunEventType
+  /// Secret-scrubbed structured detail — never raw provider payloads.
+  metadata       Json?
+  createdAt      DateTime          @default(now())
+
+  agentRun AgentRun @relation(fields: [agentRunId], references: [id], onDelete: Cascade)
+
+  @@index([agentRunId, createdAt])
+  @@map("agent_run_events")
 }
 
 enum RecommendationDomain {

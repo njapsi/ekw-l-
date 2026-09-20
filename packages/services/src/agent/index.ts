@@ -8,3 +8,7 @@ export * from './conversations.js';
 export * from './orchestrator.js';
 export * from './jobs.js';
 export * from './integration-tools.js';
+export * from './tool-registry.js';
+export * from './events.js';
+export * from './cancellation.js';
+export * from './runs.js';

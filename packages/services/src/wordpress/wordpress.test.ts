@@ -321,6 +321,50 @@ describe('write operations', () => {
     expect(s.wp.state.posts.find((p) => p.id === res.wpId)?.status).toBe('draft');
   });
 
+  it('AGENT_DRY_RUN=true simulates a draft without any real WordPress call', async () => {
+    const s = await connected();
+    const callsBefore = s.wp.calls.length;
+    process.env.AGENT_DRY_RUN = 'true';
+    try {
+      const res = await createDraft(
+        {
+          organizationId: 'org_1',
+          siteId: s.site.id,
+          actorId: 'u1',
+          db: s.asDb,
+          clientOpts: s.clientOpts,
+        },
+        { title: 'New idea', content: 'Body' },
+      );
+      expect(res).toMatchObject({ status: 'draft', dryRun: true });
+      expect(s.wp.calls.length).toBe(callsBefore);
+      expect(s.wp.state.posts.length).toBe(0);
+    } finally {
+      delete process.env.AGENT_DRY_RUN;
+    }
+  });
+
+  it('dry-run still enforces the real capability check first — it never simulates past a denial', async () => {
+    const s = await connected({ capabilities: { read: true } });
+    process.env.AGENT_DRY_RUN = 'true';
+    try {
+      await expect(
+        createDraft(
+          {
+            organizationId: 'org_1',
+            siteId: s.site.id,
+            actorId: 'u1',
+            db: s.asDb,
+            clientOpts: s.clientOpts,
+          },
+          { title: 'x' },
+        ),
+      ).rejects.toThrow(/edit_posts/);
+    } finally {
+      delete process.env.AGENT_DRY_RUN;
+    }
+  });
+
   it('refuses a draft when the WordPress user cannot edit posts', async () => {
     const s = await connected({ capabilities: { read: true } });
     await expect(

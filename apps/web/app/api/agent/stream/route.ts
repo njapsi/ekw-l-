@@ -63,7 +63,7 @@ export async function POST(req: Request) {
     throw e;
   }
 
-  const deps = agent.growthAgentDepsFromEnv();
+  const deps = agent.growthAgentDepsFromEnv({ organizationId: ctx.org.id, actorId: ctx.user.id });
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream<Uint8Array>({
@@ -77,6 +77,12 @@ export async function POST(req: Request) {
           conversationId,
           message,
           trigger: 'chat',
+          // A client disconnect (tab close, fetch abort) aborts the
+          // orchestrator's own in-flight model call immediately via the
+          // SDK's real abort mechanism — see RunTurnOptions.signal. This is
+          // a best-effort belt-and-suspenders on top of the explicit "Stop"
+          // button, which goes through cancelAgentRun instead.
+          signal: req.signal,
         })) {
           send(ev);
           if (

@@ -76,6 +76,15 @@ export const GovernancePolicySchema = z.object({
     minIntervalMinutes: z.number().int().min(15).max(10_080),
     allowedTaskTypes: z.array(z.enum(AUTOMATION_TASK_TYPES)),
   }),
+  /**
+   * How long a PENDING approval (`IntegrationActionRequest`) stays valid
+   * before it expires and must be recreated (Phase 4, Part 10). `.default`
+   * so a policy stored before this field existed still parses — it gets the
+   * same 7-day value that was previously hardcoded, not silently rejected.
+   * Bounds: 15 minutes minimum (long enough for a human to actually see and
+   * act on a notification) to 30 days maximum.
+   */
+  approvalTtlMinutes: z.number().int().min(15).max(43_200).default(10_080),
 });
 export type GovernancePolicy = z.infer<typeof GovernancePolicySchema>;
 
@@ -100,6 +109,7 @@ export const DEFAULT_POLICY: GovernancePolicy = {
     WEBSITE: { ...base },
   },
   automation: { minIntervalMinutes: 60, allowedTaskTypes: [...AUTOMATION_TASK_TYPES] },
+  approvalTtlMinutes: 10_080,
 };
 
 export function actionClassForLevel(level: CapabilityLevel): ActionClass {

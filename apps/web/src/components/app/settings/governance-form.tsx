@@ -29,6 +29,7 @@ export interface GovernancePolicyView {
   version: 1;
   integrations: Record<string, IntegrationPolicy>;
   automation: { minIntervalMinutes: number; allowedTaskTypes: string[] };
+  approvalTtlMinutes: number;
 }
 
 const CLASSES: Array<{
@@ -179,6 +180,27 @@ export function GovernanceForm({
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
+          <div className="max-w-xs space-y-1.5">
+            <Label htmlFor="g-approval-ttl">Approval requests expire after (minutes)</Label>
+            <Input
+              id="g-approval-ttl"
+              type="number"
+              min={15}
+              max={43200}
+              value={policy.approvalTtlMinutes}
+              disabled={!canEdit}
+              onChange={(e) =>
+                setPolicy((p) => ({
+                  ...p,
+                  approvalTtlMinutes: Number(e.target.value) || 15,
+                }))
+              }
+            />
+            <p className="text-muted-foreground text-xs">
+              A pending Publish/Modify/Delete request a human hasn&apos;t decided on by then expires
+              and must be recreated — it never executes silently later. Default 10,080 (7 days).
+            </p>
+          </div>
           <div className="max-w-xs space-y-1.5">
             <Label htmlFor="g-interval">Minimum minutes between runs of one automation</Label>
             <Input

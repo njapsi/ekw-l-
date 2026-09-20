@@ -17,6 +17,7 @@ import { scrubModelOutput } from '../agents/output-scrub.js';
 import { recordAudit } from '../audit/index.js';
 import { AppError } from '../errors.js';
 import { UNTRUSTED_CONTENT_SYSTEM_CLAUSE, wrapUntrusted } from '../security/untrusted.js';
+import { recordAgentRunEvent } from './events.js';
 import {
   CAPABILITY_BY_ID,
   type AgentModel,
@@ -75,9 +76,19 @@ export interface RunTurnOptions {
   conversationId?: string;
   message: string;
   trigger?: string;
+  /**
+   * Aborts the orchestrator's own direct model calls (synthesis, response
+   * writing) immediately — the SDK's real abort mechanism, not a poll.
+   * Capability sub-agent calls (youtube-analyst, etc.) are not threaded with
+   * this signal; a run cancelled mid-capability finishes that capability
+   * and stops at the next checkpoint instead (see `checkCancelled`) — this
+   * keeps cancellation from interrupting a capability mid-write.
+   */
+  signal?: AbortSignal;
 }
 
 export type TurnEvent =
+  | { type: 'run_created'; agentRunId: string; conversationId: string }
   | { type: 'status'; stage: string; detail?: string }
   | { type: 'token'; text: string }
   | {
@@ -88,7 +99,8 @@ export type TurnEvent =
       title: string;
       blocks: GrowthAgentResponseT;
     }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+  | { type: 'cancelled'; agentRunId: string };
 
 export interface RunTurnResult {
   conversationId: string;
@@ -138,6 +150,18 @@ export async function runGrowthAgentTurn(
 
 // Bridge so the non-streaming wrapper can recover the full result object.
 const internalResults = new Map<string, RunTurnResult>();
+
+/**
+ * Checkpoint-based cancellation (Part 20): cheap enough to call between every
+ * stage. `cancelAgentRun` (cancellation.ts) is the only other writer of
+ * `CANCELLED` for a chat-triggered run, via a conditional `updateMany` that
+ * only succeeds from QUEUED/RUNNING — so once this observes CANCELLED, the
+ * turn is authoritatively over and must not overwrite that state.
+ */
+async function checkCancelled(runId: string, db: Db): Promise<boolean> {
+  const row = await db.agentRun.findUnique({ where: { id: runId }, select: { status: true } });
+  return row?.status === 'CANCELLED';
+}
 
 // --- public: streaming turn -----------------------------------------
 
@@ -203,13 +227,28 @@ export async function* streamGrowthAgentTurn(
   const run = await db.agentRun.create({
     data: {
       organizationId: opts.organizationId,
+      userId: opts.userId,
+      conversationId: conversation.id,
       agent: 'growth-agent',
       status: 'RUNNING',
       trigger: opts.trigger ?? 'chat',
       input: { conversationId: conversation.id, message },
+      currentStep: 'gathering',
       startedAt: new Date(),
     },
   });
+  await recordAgentRunEvent(
+    { agentRunId: run.id, organizationId: opts.organizationId, type: 'RUN_CREATED' },
+    db,
+  );
+  await recordAgentRunEvent(
+    { agentRunId: run.id, organizationId: opts.organizationId, type: 'RUN_STARTED' },
+    db,
+  );
+  // Yielded before any stage work so the client can enable a "Stop" button
+  // immediately, well before the run otherwise finishes and reveals its id
+  // via the 'done' event.
+  yield { type: 'run_created', agentRunId: run.id, conversationId: conversation.id };
 
   try {
     // 2. context + memory
@@ -219,11 +258,29 @@ export async function* streamGrowthAgentTurn(
       loadMemory(opts.organizationId, opts.userId, db),
     ]);
     const goals = [...memory.userGoals, ...memory.orgGoals];
+    await recordAgentRunEvent(
+      { agentRunId: run.id, organizationId: opts.organizationId, type: 'CONTEXT_LOADED' },
+      db,
+    );
 
     // 3. plan
     yield { type: 'status', stage: 'planning', detail: 'Deciding which specialists to use' };
     const plan = await planTurn({ model: deps.model }, { message, context: orgContext, history });
     yield { type: 'status', stage: 'planned', detail: plan.rationale };
+    await recordAgentRunEvent(
+      {
+        agentRunId: run.id,
+        organizationId: opts.organizationId,
+        type: 'PLAN_CREATED',
+        metadata: { capabilities: plan.capabilities, rationale: plan.rationale },
+      },
+      db,
+    );
+
+    if (await checkCancelled(run.id, db)) {
+      yield { type: 'cancelled', agentRunId: run.id };
+      return;
+    }
 
     // 4. execute capabilities (org-context always first)
     const orgFirst: CapabilityId = 'org-context';
@@ -255,10 +312,29 @@ export async function* streamGrowthAgentTurn(
     // a given integration at all. A blocked capability is skipped with the
     // reason, never run.
     const governance = await getGovernancePolicy(opts.organizationId, db);
+    await db.agentRun.update({ where: { id: run.id }, data: { currentStep: 'running' } });
     const capabilityResults: CapabilityResult[] = await Promise.all(
       activeCaps.map(async (cap): Promise<CapabilityResult> => {
+        await recordAgentRunEvent(
+          {
+            agentRunId: run.id,
+            organizationId: opts.organizationId,
+            type: 'TOOL_SELECTED',
+            metadata: { capabilityId: cap.id },
+          },
+          db,
+        );
         const gate = CAPABILITY_GOVERNANCE[cap.id];
         if (gate) {
+          await recordAgentRunEvent(
+            {
+              agentRunId: run.id,
+              organizationId: opts.organizationId,
+              type: 'TOOL_AUTHORIZATION_CHECK',
+              metadata: { capabilityId: cap.id, integration: gate.integration, class: gate.cls },
+            },
+            db,
+          );
           const d = decideGovernance(governance, gate.integration, gate.cls, { viaAgent: true });
           if (!d.allowed) {
             return {
@@ -271,10 +347,38 @@ export async function* streamGrowthAgentTurn(
             };
           }
         }
+        await recordAgentRunEvent(
+          {
+            agentRunId: run.id,
+            organizationId: opts.organizationId,
+            type: 'TOOL_STARTED',
+            metadata: { capabilityId: cap.id },
+          },
+          db,
+        );
         try {
-          return await cap.run(capCtx);
+          const result = await cap.run(capCtx);
+          await recordAgentRunEvent(
+            {
+              agentRunId: run.id,
+              organizationId: opts.organizationId,
+              type: 'TOOL_COMPLETED',
+              metadata: { capabilityId: cap.id, status: result.status },
+            },
+            db,
+          );
+          return result;
         } catch (e) {
           log.warn({ capability: cap.id, err: String(e) }, 'capability failed');
+          await recordAgentRunEvent(
+            {
+              agentRunId: run.id,
+              organizationId: opts.organizationId,
+              type: 'TOOL_FAILED',
+              metadata: { capabilityId: cap.id, error: e instanceof Error ? e.message : 'error' },
+            },
+            db,
+          );
           return {
             capabilityId: cap.id,
             status: 'error',
@@ -286,19 +390,31 @@ export async function* streamGrowthAgentTurn(
         }
       }),
     );
+    await db.agentRun.update({
+      where: { id: run.id },
+      data: { toolCallCount: activeCaps.length, iterationCount: { increment: 1 } },
+    });
+
+    if (await checkCancelled(run.id, db)) {
+      yield { type: 'cancelled', agentRunId: run.id };
+      return;
+    }
 
     // 5. synthesize
     yield { type: 'status', stage: 'synthesizing', detail: 'Combining the results' };
+    await db.agentRun.update({ where: { id: run.id }, data: { currentStep: 'synthesizing' } });
     const { blocks, grounded, usedModel, usage } = await synthesize(deps, {
       message,
       orgContext,
       memorySummary: summarizeMemory(memory),
       plan,
       capabilityResults,
+      signal: opts.signal,
     });
 
     // 6. response text (streamed)
     yield { type: 'status', stage: 'writing', detail: 'Writing the answer' };
+    await db.agentRun.update({ where: { id: run.id }, data: { currentStep: 'writing' } });
     let responseText = '';
     if (deps.responseModel) {
       try {
@@ -307,6 +423,7 @@ export async function* streamGrowthAgentTurn(
             'Write a concise, friendly reply to the user from the structured analysis below. Lead with the answer. Do NOT reveal step-by-step reasoning. Do NOT invent numbers. Never guarantee rankings, revenue or traffic. 2-5 short paragraphs or a short list.\n\n' +
             UNTRUSTED_CONTENT_SYSTEM_CLAUSE,
           prompt: responsePrompt(message, blocks),
+          signal: opts.signal,
         });
         for await (const chunk of stream.textStream) {
           responseText += chunk;
@@ -340,10 +457,14 @@ export async function* streamGrowthAgentTurn(
         data: { title: deriveTitle(message) },
       });
     }
-    await db.agentRun.update({
-      where: { id: run.id },
+    // Conditional: a concurrent cancel request may have already flipped this
+    // row to CANCELLED between the last checkpoint and here — never let a
+    // completing turn overwrite that authoritative state.
+    const completed = await db.agentRun.updateMany({
+      where: { id: run.id, status: { not: 'CANCELLED' } },
       data: {
         status: 'COMPLETED',
+        currentStep: 'done',
         output: {
           blocks,
           plan,
@@ -362,6 +483,14 @@ export async function* streamGrowthAgentTurn(
         provider: usage?.provider,
       },
     });
+    if (completed.count === 0) {
+      yield { type: 'cancelled', agentRunId: run.id };
+      return;
+    }
+    await recordAgentRunEvent(
+      { agentRunId: run.id, organizationId: opts.organizationId, type: 'RUN_COMPLETED' },
+      db,
+    );
     await rememberFromTurn(
       { db, model: deps.model },
       {
@@ -409,16 +538,34 @@ export async function* streamGrowthAgentTurn(
       blocks,
     };
   } catch (e) {
+    const aborted = e instanceof Error && e.name === 'AbortError';
     await db.agentRun
-      .update({
-        where: { id: run.id },
+      .updateMany({
+        where: { id: run.id, status: { not: 'CANCELLED' } },
         data: {
-          status: 'FAILED',
-          error: e instanceof Error ? e.message : 'error',
+          status: aborted ? 'CANCELLED' : 'FAILED',
+          currentStep: 'done',
+          error: aborted ? undefined : e instanceof Error ? e.message : 'error',
+          errorCode: aborted ? undefined : 'AI_PROVIDER_ERROR',
+          cancelledAt: aborted ? new Date() : undefined,
           finishedAt: new Date(),
         },
       })
       .catch(() => undefined);
+    await recordAgentRunEvent(
+      {
+        agentRunId: run.id,
+        organizationId: opts.organizationId,
+        type: aborted ? 'RUN_CANCELLED' : 'RUN_FAILED',
+        metadata: aborted ? undefined : { error: e instanceof Error ? e.message : 'error' },
+      },
+      db,
+    );
+    if (aborted) {
+      log.info({ agentRunId: run.id }, 'growth agent turn aborted (client disconnect)');
+      yield { type: 'cancelled', agentRunId: run.id };
+      return;
+    }
     log.error({ err: String(e) }, 'growth agent turn failed');
     yield { type: 'error', message: 'The agent hit an error. Please try again.' };
   }
@@ -432,6 +579,7 @@ interface SynthInput {
   memorySummary: string;
   plan: TurnPlan;
   capabilityResults: CapabilityResult[];
+  signal?: AbortSignal;
 }
 
 async function synthesize(
@@ -495,6 +643,7 @@ Produce the structured answer for the user message above. Cite evidenceRefs for 
       schema: GrowthAgentResponse,
       system: SYNTH_SYSTEM,
       prompt,
+      signal: input.signal,
     });
     usage = res.usage;
     const candidate = res.object;

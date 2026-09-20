@@ -44,12 +44,40 @@ export interface GenerateTextOptions {
   maxRetries?: number;
   /** Per-call deadline in ms. Defaults to `AI_REQUEST_TIMEOUT_MS` (60000). */
   timeoutMs?: number;
+  /**
+   * Closed tool list for a real, model-driven tool-calling loop (Phase 4).
+   * The model can only select from exactly these tools — there is no way
+   * for it to invent a tool name, since the SDK only recognizes what's in
+   * this list. Every tool's `execute` is this package's caller's own
+   * function; `packages/ai` never decides authorization, it only wires the
+   * model's selection to the function the caller registered.
+   */
+  tools?: ToolDefinition[];
+  /**
+   * Upper bound on model↔tool round-trips in one call (a "step" is one
+   * model turn; the SDK keeps calling tools and re-prompting the model
+   * until it stops requesting tools or this cap is hit). Omitted or 1 means
+   * no multi-step tool loop — `tools` are offered but the call returns
+   * after the first response even if the model requested one.
+   */
+  maxSteps?: number;
+}
+
+/** One tool invocation the model made and its result, in call order. */
+export interface ToolCallRecord {
+  name: string;
+  args: unknown;
+  result: unknown;
 }
 
 export interface GenerateTextResult {
   text: string;
   usage: UsageRecord;
   finishReason: string;
+  /** Present only when `tools` was passed; empty array if none were called. */
+  toolCalls?: ToolCallRecord[];
+  /** Number of model↔tool round-trips actually taken (see `maxSteps`). */
+  steps?: number;
 }
 
 export interface GenerateObjectOptions<TSchema extends z.ZodTypeAny> extends GenerateTextOptions {

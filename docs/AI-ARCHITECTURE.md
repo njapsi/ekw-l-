@@ -22,24 +22,30 @@ Non-negotiables (master instruction D, I, J, K):
 
 ### Interface (`AIProvider`)
 
-| Capability            | Method                                              | Status                                                      |
-| --------------------- | --------------------------------------------------- | ----------------------------------------------------------- |
-| Text generation       | `generateText`                                      | shipped (Phase 0)                                           |
-| Structured JSON       | `generateObject(schema)`                            | shipped                                                     |
-| Streaming text        | `streamText`                                        | shipped                                                     |
-| Embeddings            | `embed` (optional)                                  | interface present                                           |
-| **Tool calling**      | `generateWithTools` / `streamWithTools`             | **planned, Phase "AI orchestration"** (see risk in ROADMAP) |
-| Model selection       | `ModelRef { provider, model }` per call             | shipped                                                     |
-| **Model roles**       | `getForRole('analyst'\|'router'\|…)`                | shipped (Phase 22)                                          |
-| Usage + cost          | `UsageRecord` from every call                       | shipped                                                     |
-| **Timeout**           | `AI_REQUEST_TIMEOUT_MS` per call (`withResilience`) | shipped (Phase 22)                                          |
-| **Retry**             | `AI_MAX_RETRIES` (429/5xx/network, SDK)             | shipped (Phase 22)                                          |
-| **Provider fallback** | `AI_FALLBACK_MODELS` chain (`FallbackProvider`)     | shipped (Phase 22)                                          |
-| **Kill switch**       | `AI_DISABLED` / `AI_DISABLED_PROVIDERS`             | shipped (Phase 22)                                          |
+| Capability            | Method                                              | Status                                                                                          |
+| --------------------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| Text generation       | `generateText`                                      | shipped (Phase 0)                                                                               |
+| Structured JSON       | `generateObject(schema)`                            | shipped                                                                                         |
+| Streaming text        | `streamText`                                        | shipped                                                                                         |
+| Embeddings            | `embed` (optional)                                  | interface present                                                                               |
+| **Tool calling**      | `generateText({ tools, maxSteps })`                 | **shipped (Phase 4)** — real, tested, not yet called by any live orchestrator capability        |
+| Model selection       | `ModelRef { provider, model }` per call             | shipped                                                                                         |
+| **Model roles**       | `getForRole('analyst'\|'router'\|…)`                | shipped (Phase 22)                                                                              |
+| Usage + cost          | `UsageRecord` from every call                       | shipped; wired into every growth-agent turn's model calls, not just the final one (Phase 4 fix) |
+| **Timeout**           | `AI_REQUEST_TIMEOUT_MS` per call (`withResilience`) | shipped (Phase 22)                                                                              |
+| **Retry**             | `AI_MAX_RETRIES` (429/5xx/network, SDK)             | shipped (Phase 22)                                                                              |
+| **Provider fallback** | `AI_FALLBACK_MODELS` chain (`FallbackProvider`)     | shipped (Phase 22)                                                                              |
+| **Kill switch**       | `AI_DISABLED` / `AI_DISABLED_PROVIDERS`             | shipped (Phase 22)                                                                              |
 
-Tool-calling is currently done one level up (the orchestrator loops
-`generateObject` for a next-action decision). `generateWithTools` will fold the
-provider-native tool loop into the interface without changing call sites.
+**Tool-calling (Phase 4).** `GenerateTextOptions` now accepts `tools:
+ToolDefinition[]` and `maxSteps`; `VercelAIProvider.generateText` maps them
+to the Vercel AI SDK's own multi-step tool-calling loop and returns
+`toolCalls`/`steps` on the result (`packages/ai/src/providers/vercel.ts`,
+tested in the sibling `.test.ts`). The growth-agent orchestrator's
+capabilities still make their own direct function calls rather than
+offering the model a tool list — see `docs/AGENT-RUNTIME.md` §6 for the
+full reasoning and `docs/AGENTS.md` for the current, precise "nothing live
+uses this yet" statement.
 
 ### Resilience (Phase 22)
 
@@ -222,6 +228,15 @@ be pinned).
 ---
 
 ## 4. Tools
+
+> **Phase 4 update.** The concrete implementation is
+> `packages/services/src/agent/tool-registry.ts` (catalogues the existing
+> closed `integration-tools.ts` allowlist with risk/category/provider-type
+> metadata) plus `packages/ai`'s new `GenerateTextOptions.tools`/`maxSteps`
+> (real Vercel AI SDK multi-step tool-calling, tested). Neither is wired
+> into a live orchestrator capability yet — see `docs/AGENT-RUNTIME.md` §6
+> for exactly what exists versus what's conceptual below, and why wiring
+> it in was deliberately deferred.
 
 A tool = `{ name, description, parameters: ZodSchema, sideEffects, requiredScopes,
 execute }`. The registry is the only place tools are defined.

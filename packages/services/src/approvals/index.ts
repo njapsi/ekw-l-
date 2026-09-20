@@ -31,7 +31,11 @@ import {
 } from '../integrations/contract.js';
 import { createNotification } from '../notifications/index.js';
 import { scrubSecrets } from '../observability/scrub.js';
-import { actionClassForLevel, assertGovernanceAllows } from '../governance/index.js';
+import {
+  actionClassForLevel,
+  assertGovernanceAllows,
+  getGovernancePolicy,
+} from '../governance/index.js';
 import {
   CreateDraftPayload,
   PublishPostPayload,
@@ -198,6 +202,10 @@ export async function requestIntegrationAction(input: RequestActionInput, db: Db
   );
 
   const summary = scrubSecrets(input.summary.trim()).slice(0, 300) || cap.label;
+  // Org-configurable (Phase 4, Part 10; ADR-0052/0054); `APPROVAL_TTL_MS`
+  // below is only the fallback for a policy that somehow fails to parse.
+  const policy = await getGovernancePolicy(input.organizationId, db).catch(() => null);
+  const ttlMs = policy ? policy.approvalTtlMinutes * 60_000 : APPROVAL_TTL_MS;
   const row = await db.integrationActionRequest.create({
     data: {
       organizationId: input.organizationId,
@@ -209,7 +217,7 @@ export async function requestIntegrationAction(input: RequestActionInput, db: Db
       payload: payload as Prisma.InputJsonValue,
       source: input.source ?? 'USER',
       requestedById: input.requestedById,
-      expiresAt: new Date(Date.now() + APPROVAL_TTL_MS),
+      expiresAt: new Date(Date.now() + ttlMs),
     },
   });
 

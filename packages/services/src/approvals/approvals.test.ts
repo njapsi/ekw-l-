@@ -30,6 +30,16 @@ const {
 let db: MemoryDb;
 let asDb: Db;
 
+const BASE_POLICY = {
+  agentAllowed: true,
+  analyze: 'automatic',
+  generate: 'automatic',
+  draft: 'automatic',
+  modify: 'approval_required',
+  publish: 'approval_required',
+  delete: 'approval_required',
+};
+
 async function site(caps: string[] = ['read', 'edit_posts', 'publish_posts'], status = 'ACTIVE') {
   return db.wordPressSite.create({
     data: {
@@ -78,6 +88,32 @@ describe('requestIntegrationAction', () => {
     expect(row.level).toBe('PUBLISH');
     expect(executePublishPost).not.toHaveBeenCalled();
     expect(await countPendingActions('org_1', asDb)).toBe(1);
+  });
+
+  it('uses the org’s configured approvalTtlMinutes instead of the 7-day default', async () => {
+    const s = await site();
+    await db.aiGovernancePolicy.create({
+      data: {
+        organizationId: 'org_1',
+        policy: {
+          version: 1,
+          integrations: {
+            YOUTUBE: BASE_POLICY,
+            TIKTOK: BASE_POLICY,
+            WORDPRESS: BASE_POLICY,
+            GOOGLE_SEARCH_CONSOLE: BASE_POLICY,
+            WEBSITE: BASE_POLICY,
+          },
+          automation: { minIntervalMinutes: 60, allowedTaskTypes: [] },
+          approvalTtlMinutes: 30,
+        },
+      },
+    });
+    const before = Date.now();
+    const row = await publishRequest(s.id as string);
+    const minutes = (row.expiresAt.getTime() - before) / 60_000;
+    expect(minutes).toBeGreaterThan(29);
+    expect(minutes).toBeLessThan(31);
   });
 
   it('notifies the org that an approval is needed', async () => {

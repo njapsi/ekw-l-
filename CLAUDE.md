@@ -1146,6 +1146,69 @@ password.ts` hashes with salted scrypt via `node:crypto` — no bcrypt/
     the token/primitive fixes automatically but keep their existing layouts;
     full per-item accounting (done / inherited-not-redesigned / not started)
     is in `docs/PHASE-3-REPORT.md`, ADR-0053.
+- **AI agent core / real agentic execution engine** ✅ (operator's
+  "Phase 4" — closes genuine gaps, does not rebuild what already worked):
+  the brief's own "audit before coding" rule found that most of what it
+  asked for already existed under different names — a real orchestrator
+  loop, a mature approval system with exactly-once execution and payload
+  replay (never model reinterpretation), governance-based risk gating whose
+  schema cannot even express an unsafe policy, and prompt-injection
+  defenses already red-teamed. The genuine gaps, closed: **a durable
+  per-step timeline** — new `AgentRunEvent` table + `AgentRun` gains
+  `userId`/`conversationId`/`currentStep`/`iterationCount`/`toolCallCount`/
+  `errorCode`/`metadata`/`cancelledAt`/`updatedAt` and two reserved statuses
+  (`PAUSED`, `TIMED_OUT`); every real stage transition writes a
+  secret-scrubbed event, exposed via new `GET /api/agent/runs/:id` and
+  `GET /api/agent/runs/:id/events`. **Cancellation** — previously
+  impossible for an interactive chat turn (confirmed by audit, not
+  assumed): checkpoint-based (`cancelAgentRun`, the same exactly-once
+  conditional-`updateMany` pattern as approvals) between stages, plus a
+  real `AbortSignal` threaded from the HTTP request into the orchestrator's
+  own two direct model calls; a "Stop" button in the chat UI, wired to a
+  new early `run_created` SSE event so the client has the run id well
+  before completion. **A formal Tool Registry**
+  (`agent/tool-registry.ts`) catalogues — does not reimplement — the
+  existing closed 4-tool `integration-tools.ts` allowlist with risk/
+  category/provider-type metadata. **Real tool-calling shipped in
+  `packages/ai`** (`GenerateTextOptions.tools`/`maxSteps`, mapped to the
+  Vercel AI SDK's actual multi-step tool loop, tested) — closing a
+  `ToolDefinition` type that existed but was dead code — but **deliberately
+  not wired into any live orchestrator capability**: doing so would be the
+  single highest-risk change available this phase for a narrow benefit,
+  against the brief's own repeated "do not overbuild"; the tested
+  primitive ships, wiring it into a capability is the clearest next slice
+  for a future phase (`docs/AGENTS.md` updated to say precisely this, not
+  the old blanket "not implemented"). **Configurable approval expiration**
+  (`governance.approvalTtlMinutes`, default 10,080 = the previous
+  hardcoded 7 days, org-editable in Settings → AI governance). **Dry-run
+  mode** (`AGENT_DRY_RUN=true`) on the three WordPress approval executors —
+  authorization checks still run, only the network call is skipped,
+  verified live via the fake-WordPress-transport test harness (zero new
+  calls; a denied capability still throws). **A real usage-metering bug
+  fixed**: `growthAgentDepsFromEnv` built its provider registry with no
+  usage sink, so only a turn's final synthesis call ever reported to the
+  org's `AI_REQUESTS`/`AI_TOKENS` billing meters — every capability
+  sub-agent call's real cost was invisible to billing enforcement; fixed by
+  wiring a real `UsageSink` in (the top-level `AgentRun`'s _displayed_
+  cost still reflects only its synthesis call, a disclosed, cosmetic
+  remainder — billing correctness was prioritized over display
+  completeness). **No Temporal** (none existed, none added — the existing
+  Agent Runtime → Orchestrator → Worker → Tool Activities boundary already
+  matches Temporal's own suggested shape, documented for future adoption)
+  and **no activation of the worker's dead `agent-run` BullMQ queue**
+  (fully built, correctly registered, confirmed by repo-wide grep that
+  nothing ever calls `.add()` on it — real background execution needs a
+  product surface that doesn't exist yet, not a wiring fix). Migration
+  `20260923120000_agent_runtime` (additive), verified against a real,
+  isolated staging-Postgres schema — not just unit tests — including a
+  direct query confirming one real turn writes the exact expected 12-event
+  causal sequence and that cancellation atomically flips status. Gates
+  green: lint 14/14, typecheck 14/14, **`packages/services` 948 tests**
+  (+10) + **`packages/ai` 25 tests** (+3), web build clean, all 11
+  integration test files (55 tests) passing against the real isolated
+  schema. See `docs/AGENT-RUNTIME.md`, `docs/PHASE-4-REPORT.md`,
+  `docs/AGENTS.md` (updated), `docs/AI-ARCHITECTURE.md` (updated),
+  ADR-0054.
 - **Still outstanding:** Postgres **RLS** (ADR-0035, re-affirmed in
   ADR-0052 — application-layer scoping + the CI tenant-scope lint +
   integration tests, now actually running, remain the accepted mitigation);
@@ -1160,10 +1223,18 @@ password.ts` hashes with salted scrypt via `node:crypto` — no bcrypt/
   a context panel, a content calendar, onboarding); a full WCAG 2.2 AA
   re-audit of the Phase 3 UI changes (spot-verified only); a screenshot
   -diff visual-regression baseline; roadmap "Phase 10" leftovers
-  (recommendation lifecycle UI, task board, notifications + digests); the
-  general model-driven
-  orchestrator + `generateWithTools` + `AgentToolCall` + `pgvector` memory +
-  the remaining agents + agent kill switches; SEO object-storage archiving +
+  (recommendation lifecycle UI, task board, notifications + digests);
+  wiring the now-real `packages/ai` tool-calling support into an actual
+  live `growth-agent` capability (the infrastructure and tests exist —
+  see ADR-0054/`docs/AGENT-RUNTIME.md` §6 — nothing in the live
+  orchestrator path calls it yet); activating the worker's `agent-run`
+  BullMQ queue with a real background-run product surface (the queue and
+  processor are fully built and idle, per ADR-0054); a per-turn wall-clock
+  `MAX_RUNTIME`/`TIMED_OUT` (the status value is reserved, nothing sets it
+  yet); rolling a turn's full sub-agent AI cost up into its parent
+  `AgentRun`'s displayed `costUsd` (billing enforcement is already
+  correct; only the _display_ undercounts); `pgvector` memory + the
+  remaining agents + agent kill switches; SEO object-storage archiving +
   network-isolated egress pool; billing follow-ups (a worker queue for the
   reconcile + counter rollup, Stripe usage-record push for metered overage);
   reporting follow-ups (charts in the PDF, scheduled report packs); automation

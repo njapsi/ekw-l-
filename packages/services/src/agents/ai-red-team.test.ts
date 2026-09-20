@@ -99,15 +99,30 @@ function fakeDb(opts: { existingConvoOrg?: string } = {}) {
     },
     agentRun: {
       create: vi.fn(async ({ data }: any) => {
-        const r = { id: `run_${store.agentRuns.length}`, ...data };
+        const r = { id: `run_${store.agentRuns.length}`, status: 'RUNNING', ...data };
         store.agentRuns.push(r);
         return r;
       }),
-      update: vi.fn(async ({ data }: any) => {
+      update: vi.fn(async ({ where, data }: any) => {
         store.runUpdates.push(data);
-        return {};
+        const r = store.agentRuns.find((x: any) => x.id === where.id);
+        if (r) Object.assign(r, data);
+        return r ?? {};
+      }),
+      updateMany: vi.fn(async ({ where, data }: any) => {
+        store.runUpdates.push(data);
+        const r = store.agentRuns.find((x: any) => x.id === where.id);
+        if (!r) return { count: 0 };
+        if (where.status?.not && r.status === where.status.not) return { count: 0 };
+        Object.assign(r, data);
+        return { count: 1 };
+      }),
+      findUnique: vi.fn(async ({ where }: any) => {
+        const r = store.agentRuns.find((x: any) => x.id === where.id);
+        return r ? { status: r.status } : null;
       }),
     },
+    agentRunEvent: { create: vi.fn(async () => ({})) },
     orgMemory: {
       findMany: emptyFindMany,
       findFirst: vi.fn(async () => null),

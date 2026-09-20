@@ -75,6 +75,18 @@ const publishCap = (kind: WpContentKind) => (kind === 'pages' ? 'publish_pages' 
 const editPublishedCap = (kind: WpContentKind) =>
   kind === 'pages' ? 'edit_published_pages' : 'edit_published_posts';
 
+/**
+ * Dry-run mode (Phase 4, Part 36): `AGENT_DRY_RUN=true` makes every write
+ * below stop after its real authorization/connection/capability checks —
+ * the same checks a live run would fail on are still exercised — but
+ * returns a simulated, clearly-labelled result instead of calling
+ * WordPress. Never gated on anything client-supplied; it is a deployment
+ * -wide switch for safe development/staging, not a per-request flag.
+ */
+function isDryRun(): boolean {
+  return process.env.AGENT_DRY_RUN === 'true' || process.env.AGENT_DRY_RUN === '1';
+}
+
 export async function createDraft(ctx: Ctx, raw: unknown) {
   const db = ctx.db ?? prisma;
   const payload = validate(CreateDraftPayload, raw);
@@ -82,6 +94,9 @@ export async function createDraft(ctx: Ctx, raw: unknown) {
   // An org can switch WordPress drafting off entirely (AI governance).
   await assertGovernanceAllows(ctx.organizationId, 'WORDPRESS', 'draft', { viaAgent: false }, db);
   need(site.detectedCapabilities, editCap(payload.kind), 'create drafts');
+  if (isDryRun()) {
+    return { wpId: -1, status: 'draft' as const, link: null, dryRun: true };
+  }
   try {
     const post = await clientForSite(site, ctx.clientOpts).createPost(payload.kind, {
       title: payload.title,
@@ -117,6 +132,9 @@ export async function executeUpdatePost(ctx: Ctx, raw: unknown) {
   const payload = validate(UpdatePostPayload, raw);
   const site = await requireWordPressSite(ctx.organizationId, ctx.siteId, db);
   need(site.detectedCapabilities, editCap(payload.kind), 'edit content');
+  if (isDryRun()) {
+    return { wpId: payload.wpId, status: 'draft' as const, link: null, dryRun: true };
+  }
   try {
     const client = clientForSite(site, ctx.clientOpts);
     const current = await client.getPost(payload.kind, payload.wpId);
@@ -137,6 +155,9 @@ export async function executePublishPost(ctx: Ctx, raw: unknown) {
   const payload = validate(PublishPostPayload, raw);
   const site = await requireWordPressSite(ctx.organizationId, ctx.siteId, db);
   need(site.detectedCapabilities, publishCap(payload.kind), 'publish');
+  if (isDryRun()) {
+    return { wpId: payload.wpId, status: 'publish' as const, link: null, dryRun: true };
+  }
   try {
     const client = clientForSite(site, ctx.clientOpts);
     const current = await client.getPost(payload.kind, payload.wpId);

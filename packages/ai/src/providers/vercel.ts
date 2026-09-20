@@ -2,7 +2,9 @@ import {
   generateObject as aiGenerateObject,
   generateText as aiGenerateText,
   streamText as aiStreamText,
+  tool as aiTool,
   type LanguageModel,
+  type ToolSet,
 } from 'ai';
 import type { z } from 'zod';
 import { makeUsageRecord } from '../pricing.js';
@@ -14,7 +16,48 @@ import type {
   GenerateTextResult,
   ProviderName,
   StreamTextResult,
+  ToolCallRecord,
+  ToolDefinition,
 } from '../types.js';
+
+/**
+ * Maps our provider-agnostic `ToolDefinition[]` to the Vercel AI SDK's
+ * `ToolSet`. `execute` is exactly the function the caller registered —
+ * `packages/ai` performs no authorization of its own; that lives entirely
+ * in whoever builds the `ToolDefinition` (the agent's tool registry).
+ */
+function buildToolSet(tools: ToolDefinition[] | undefined): ToolSet | undefined {
+  if (!tools || tools.length === 0) return undefined;
+  const set: ToolSet = {};
+  for (const t of tools) {
+    set[t.name] = aiTool({
+      description: t.description,
+      parameters: t.parameters,
+      execute: t.execute,
+    });
+  }
+  return set;
+}
+
+/** Flattens every step's tool calls/results across a multi-step run, in order. */
+function collectToolCalls(
+  steps: readonly { toolCalls?: unknown[]; toolResults?: unknown[] }[],
+): ToolCallRecord[] {
+  const calls: ToolCallRecord[] = [];
+  for (const step of steps) {
+    const toolCalls = (step.toolCalls ?? []) as {
+      toolCallId: string;
+      toolName: string;
+      args: unknown;
+    }[];
+    const toolResults = (step.toolResults ?? []) as { toolCallId: string; result: unknown }[];
+    for (const call of toolCalls) {
+      const found = toolResults.find((r) => r.toolCallId === call.toolCallId);
+      calls.push({ name: call.toolName, args: call.args, result: found?.result });
+    }
+  }
+  return calls;
+}
 
 /**
  * Adapts any Vercel AI SDK `LanguageModel` to our provider-agnostic interface.
@@ -45,6 +88,7 @@ export class VercelAIProvider implements AIProvider {
 
   async generateText(opts: GenerateTextOptions): Promise<GenerateTextResult> {
     const { model, id } = this.model(opts.model?.model);
+    const tools = buildToolSet(opts.tools);
     const res = await aiGenerateText({
       model,
       system: opts.system,
@@ -54,11 +98,13 @@ export class VercelAIProvider implements AIProvider {
       maxTokens: opts.maxTokens,
       maxRetries: this.retries(opts),
       abortSignal: opts.signal,
+      ...(tools ? { tools, maxSteps: opts.maxSteps ?? 1 } : {}),
     });
     return {
       text: res.text,
       finishReason: res.finishReason,
       usage: makeUsageRecord(this.name, id, res.usage.promptTokens, res.usage.completionTokens),
+      ...(tools ? { toolCalls: collectToolCalls(res.steps), steps: res.steps.length } : {}),
     };
   }
 
