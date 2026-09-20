@@ -127,6 +127,37 @@ authorization-checked per call and was already covered by Phase 22/25's
 adversarial tests as a registry, so revisiting is expected to be
 confirmatory, not a new audit from zero — but it must still happen.
 
+## The tool ecosystem (Phase 5)
+
+Phase 5 (`docs/TOOL-PLATFORM.md`, `docs/MCP.md`, ADR-0055) built a Policy
+Engine, Capability Discovery, a unified Tool Executor, two research tools,
+and a real MCP client + server registry — but, in the same disclosed
+pattern as Phase 4's tool-calling primitive, **none of it is wired into the
+live `growth-agent` orchestrator's planner or turn loop**. `planner.ts`
+still selects from the fixed 7-capability `CAPABILITY_IDS` enum, unchanged;
+`orchestrator.ts` still calls each capability function directly, not
+`agent/tool-executor.ts`. This means:
+
+- **MCP tool calls are real and executable**, but only through
+  `agent/tool-executor.ts` called directly (e.g. a future admin "test this
+  tool" surface) or a future phase's growth-agent integration — not
+  through today's live chat turn.
+- **Tool manipulation is still not a live attack surface for the
+  growth-agent path** for the same structural reason as Phase 4: no
+  runtime function-calling decision exists in that path for an injection
+  to redirect.
+- **MCP introduces a genuinely new attack surface that Phase 5 did
+  address directly** (not by relying on the growth-agent path being
+  inert): an MCP server is explicitly modeled as untrusted (starts
+  `UNVERIFIED_EXTERNAL`, every tool disabled by default, output
+  size-capped and secret-scrubbed, both org governance and per-tool/
+  server enablement re-checked on every call from the database). See
+  `docs/MCP.md` §11 for the full security summary.
+- **The next phase that wires MCP or research tools into the live
+  growth-agent orchestrator must re-run the adversarial/red-team suites
+  against that specific new path** before shipping, exactly like Phase
+  4's equivalent instruction for the native tool-calling primitive.
+
 ## Untrusted-content fencing (Phase 22, extended Phase 25)
 
 Every model prompt that carries external or user text fences it with

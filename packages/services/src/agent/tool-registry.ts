@@ -1,22 +1,31 @@
 /**
- * Agent Tool Registry (Phase 4, Parts 6-8, 25, 29-31).
+ * Agent Tool Registry (Phase 4 Parts 6-8, 25, 29-31; extended Phase 5 Parts
+ * 5-8, 51 with research tools and per-org MCP tools).
  *
- * This module does not implement any tool itself — every tool it lists is
- * `integration-tools.ts`'s existing, already-audited, closed allowlist
- * (Phase 1). What's new here is the metadata shape the brief asks for
- * (category / risk level / provider type / permission level) and the
- * bridge that turns that allowlist into real, model-driven function-calling
- * via `packages/ai`'s `ToolDefinition` (Phase 4's `tools`/`maxSteps`
- * addition to `generateText`).
+ * This module does not implement any tool itself — every native tool it
+ * lists is `integration-tools.ts`'s existing, already-audited, closed
+ * allowlist (Phase 1); every research tool is `research/tools.ts`'s
+ * two-tool surface (Phase 5); every MCP tool is one an org's admin has
+ * explicitly enabled (`mcp/registry.ts`). What this module adds is the
+ * metadata shape the brief asks for (category / risk level / provider type
+ * / permission level) and the bridge that turns the *native* allowlist into
+ * real, model-driven function-calling via `packages/ai`'s `ToolDefinition`
+ * (Phase 4's `tools`/`maxSteps` addition to `generateText`).
  *
  * The model can only ever select a tool from this exact list — there is no
  * path from a model's output to an arbitrary function call. Authorization
- * is unchanged and still lives inside each tool's own `execute` (via
- * `assertCapabilityUsable` / `assertGovernanceAllows`), never here; this
- * registry only *describes* what already exists so it can be reasoned about
- * and audited as one catalogue.
+ * for a native/research tool call is unchanged and lives inside its own
+ * `execute`; an MCP tool call's authorization is `mcp/execute.ts` + the
+ * Policy Engine. Either way, this registry only *describes* what exists so
+ * it can be reasoned about and audited as one catalogue — it does not
+ * itself decide whether a call may run.
  */
+import type { Db } from '@growth-agent/db';
+import { prisma } from '@growth-agent/db';
 import type { ToolDefinition } from '@growth-agent/ai';
+import { listEnabledMcpTools } from '../mcp/registry.js';
+import type { RESEARCH_TOOL_NAMES } from '../research/tools.js';
+import { RESEARCH_TOOLS } from '../research/tools.js';
 import {
   INTEGRATION_TOOLS,
   type IntegrationToolContext,
@@ -25,21 +34,18 @@ import {
 } from './integration-tools.js';
 
 /** LOW → read-only or purely observational. MEDIUM → creates a pending,
- * human-approved request but commits nothing itself. HIGH/CRITICAL are
- * reserved for a future tool that could itself publish/delete — none exists
- * in the closed allowlist today, so no tool currently carries them. */
+ * human-approved request but commits nothing itself. HIGH/CRITICAL describe
+ * an MCP tool whose trust level (Part 30) puts it in that band — no native
+ * tool carries them, since the closed allowlist has no tool that could
+ * itself publish/delete. */
 export type ToolRiskLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
 
-/** Where a tool's implementation lives. MCP is a placeholder for Phase 25's
- * future work — nothing registers an MCP tool today (see docs/AGENT-RUNTIME.md
- * §MCP readiness); the type exists so a future MCP tool is a data addition,
- * not an architecture change. */
 export type ToolProviderType = 'INTERNAL' | 'INTEGRATION' | 'MCP';
 
 export type ToolCategory = 'READ' | 'ANALYSIS' | 'GENERATION' | 'ACTION';
 
 export interface AgentToolMetadata {
-  name: IntegrationToolName;
+  name: string;
   description: string;
   category: ToolCategory;
   /** Null for a tool that isn't scoped to one connected platform. */
@@ -90,14 +96,73 @@ const METADATA: Record<IntegrationToolName, Omit<AgentToolMetadata, 'name' | 'de
   },
 };
 
-/** The full catalogue, for admin/observability display (Part 57) — never
- * exposes a handler, only the description of what exists. */
+const RESEARCH_METADATA: Record<
+  (typeof RESEARCH_TOOL_NAMES)[number],
+  Omit<AgentToolMetadata, 'name' | 'description'>
+> = {
+  'research.fetch': {
+    category: 'READ',
+    integration: null,
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTERNAL',
+    organizationScoped: true,
+  },
+  'research.search': {
+    category: 'READ',
+    integration: null,
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTERNAL',
+    organizationScoped: true,
+  },
+};
+
+/** The static catalogue — native + research tools, identical for every
+ * organization. Never exposes a handler, only the description of what
+ * exists (Part 57). Use `listOrgToolMetadata` for the per-org catalogue
+ * that also includes enabled MCP tools. */
 export function listToolMetadata(): AgentToolMetadata[] {
-  return Object.values(INTEGRATION_TOOLS).map((tool) => ({
+  const native = Object.values(INTEGRATION_TOOLS).map((tool) => ({
     name: tool.name,
     description: tool.description,
     ...METADATA[tool.name],
   }));
+  const research = Object.values(RESEARCH_TOOLS).map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    ...RESEARCH_METADATA[tool.name],
+  }));
+  return [...native, ...research];
+}
+
+/**
+ * The catalogue this organization's agent runtime can actually select from
+ * right now (Part 51) — the static list plus every MCP tool this org's
+ * admin has enabled, on a server that is itself enabled. Nothing here
+ * implies the tool will succeed (a disconnected server still shows as
+ * UNAVAILABLE via the Policy Engine at call time) — this is discovery, not
+ * an authorization decision.
+ */
+export async function listOrgToolMetadata(
+  organizationId: string,
+  db: Db = prisma,
+): Promise<AgentToolMetadata[]> {
+  const [staticTools, mcpTools] = await Promise.all([
+    Promise.resolve(listToolMetadata()),
+    listEnabledMcpTools(organizationId, db),
+  ]);
+  const mcp: AgentToolMetadata[] = mcpTools.map((t) => ({
+    name: t.namespacedName,
+    description: `${t.name} (via ${t.serverName})`,
+    category: 'READ',
+    integration: 'MCP',
+    riskLevel: t.riskLevel,
+    requiresApproval: false,
+    providerType: 'MCP',
+    organizationScoped: true,
+  }));
+  return [...staticTools, ...mcp];
 }
 
 export function deriveRiskLevel(name: IntegrationToolName): ToolRiskLevel {

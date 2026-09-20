@@ -13,6 +13,8 @@ export * as apiKeys from './apikeys/index.js';
 export * as governance from './governance/index.js';
 export * as seo from './seo/index.js';
 export * as agent from './agent/index.js';
+export * as mcp from './mcp/index.js';
+export * as research from './research/index.js';
 export * as content from './content/index.js';
 export * as monetization from './monetization/index.js';
 export * as billing from './billing/index.js';

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { USAGE_METERS } from '../usage/meters.js';
 import { getPlan } from './plans.js';
 import { resolveEntitlements, syncPlanEntitlements } from './entitlements.js';
 
@@ -39,7 +40,7 @@ describe('syncPlanEntitlements', () => {
     await syncPlanEntitlements('org1', 'PRO', db as never);
     const limitRows = db._rows.filter((r: any) => r.key.startsWith('limit:'));
     const featureRows = db._rows.filter((r: any) => r.key.startsWith('feature:'));
-    expect(limitRows).toHaveLength(8);
+    expect(limitRows).toHaveLength(USAGE_METERS.length);
     expect(featureRows.length).toBeGreaterThanOrEqual(7);
     const aiTokens = db._rows.find((r: any) => r.key === 'limit:AI_TOKENS');
     expect(aiTokens.limitValue).toBe(BigInt(getPlan('PRO').limits.AI_TOKENS!));

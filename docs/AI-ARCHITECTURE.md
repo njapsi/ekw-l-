@@ -237,6 +237,19 @@ be pinned).
 > into a live orchestrator capability yet — see `docs/AGENT-RUNTIME.md` §6
 > for exactly what exists versus what's conceptual below, and why wiring
 > it in was deliberately deferred.
+>
+> **Phase 5 update.** The conceptual "`search_web_public`"/"`enqueue_*`"
+> naming below predates the real implementation; the actual tool names are
+> `research.fetch` / `research.search` (read-only, no `enqueue`/`execute`
+> tool exists or is planned — `docs/TOOL-PLATFORM.md` §6) and
+> `mcp.<server>.<name>` for an org's explicitly enabled MCP tools
+> (`docs/MCP.md`). A real
+> Policy Engine (`agent/policy-engine.ts`) and a unified Tool Executor
+> (`agent/tool-executor.ts`) now exist with the seven-outcome precedence
+> model this document's "Permissioning"/"Rate/cost" bullets gestured at —
+> see `docs/TOOL-PLATFORM.md` for the concrete architecture. As with the
+> Phase 4 tool-calling primitive, **none of this is wired into the live
+> orchestrator's turn loop yet.**
 
 A tool = `{ name, description, parameters: ZodSchema, sideEffects, requiredScopes,
 execute }`. The registry is the only place tools are defined.

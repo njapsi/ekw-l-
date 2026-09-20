@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
-import { approvals, integrations } from '@growth-agent/services';
+import { approvals, integrations, mcp } from '@growth-agent/services';
 
 type ConnectionCenterEntry = Awaited<ReturnType<typeof integrations.getConnectionCenter>>[number];
 type ConnectionState = ConnectionCenterEntry['state'];
@@ -14,6 +14,7 @@ import {
   LayoutTemplate,
   Lock,
   Music2,
+  Plug,
   Search,
   Youtube,
 } from 'lucide-react';
@@ -239,10 +240,12 @@ function IntegrationCard({ entry }: { entry: ConnectionCenterEntry }) {
 
 export default async function IntegrationsPage() {
   const { org } = await requireActiveOrg();
-  const [entries, pendingApprovals] = await Promise.all([
+  const [entries, pendingApprovals, mcpServers] = await Promise.all([
     integrations.getConnectionCenter(org.id),
     approvals.countPendingActions(org.id),
+    mcp.listMcpServers(org.id),
   ]);
+  const mcpEnabledCount = mcpServers.filter((s) => s.enabled).length;
   const summary = integrations.summarizeCenter(entries);
 
   return (
@@ -298,6 +301,27 @@ export default async function IntegrationsPage() {
         {entries.map((entry) => (
           <IntegrationCard key={entry.descriptor.key} entry={entry} />
         ))}
+        <Card>
+          <CardHeader className="flex-row items-center gap-3 space-y-0">
+            <Plug className="text-muted-foreground h-5 w-5 shrink-0" aria-hidden />
+            <div className="min-w-0 flex-1">
+              <CardTitle className="text-base">MCP servers</CardTitle>
+              <p className="text-muted-foreground text-xs">
+                Third-party Model Context Protocol tools.
+              </p>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <p className="text-sm">
+              {mcpServers.length === 0
+                ? 'None connected.'
+                : `${mcpServers.length} server${mcpServers.length === 1 ? '' : 's'}, ${mcpEnabledCount} enabled.`}
+            </p>
+            <Button asChild size="sm">
+              <Link href="/app/integrations/mcp">Manage</Link>
+            </Button>
+          </CardContent>
+        </Card>
       </div>
     </div>
   );

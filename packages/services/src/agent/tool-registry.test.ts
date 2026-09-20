@@ -1,20 +1,54 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildAgentToolDefinitions, deriveRiskLevel, listToolMetadata } from './tool-registry.js';
+import {
+  buildAgentToolDefinitions,
+  deriveRiskLevel,
+  listOrgToolMetadata,
+  listToolMetadata,
+} from './tool-registry.js';
 import { INTEGRATION_TOOL_NAMES } from './integration-tools.js';
+import { RESEARCH_TOOL_NAMES } from '../research/tools.js';
 
 vi.mock('../integrations/center.js', () => ({
   getConnectionCenter: vi.fn(async () => []),
 }));
 
+const listEnabledMcpTools = vi.fn(async () => [] as unknown[]);
+vi.mock('../mcp/registry.js', () => ({
+  listEnabledMcpTools: (...a: unknown[]) =>
+    (listEnabledMcpTools as (...x: unknown[]) => unknown)(...a),
+}));
+
 describe('tool registry', () => {
-  it('lists metadata for exactly the closed integration-tools allowlist, nothing more', () => {
+  it('lists metadata for exactly the closed native allowlist plus the research tools, nothing more', () => {
     const meta = listToolMetadata();
-    expect(meta.map((m) => m.name).sort()).toEqual([...INTEGRATION_TOOL_NAMES].sort());
+    expect(meta.map((m) => m.name).sort()).toEqual(
+      [...INTEGRATION_TOOL_NAMES, ...RESEARCH_TOOL_NAMES].sort(),
+    );
     for (const m of meta) {
       expect(m.organizationScoped).toBe(true);
       expect(['LOW', 'MEDIUM', 'HIGH', 'CRITICAL']).toContain(m.riskLevel);
       expect(['READ', 'ANALYSIS', 'GENERATION', 'ACTION']).toContain(m.category);
     }
+  });
+
+  it('listOrgToolMetadata adds only this org’s enabled MCP tools on top of the static catalogue', async () => {
+    listEnabledMcpTools.mockResolvedValueOnce([
+      {
+        serverId: 's1',
+        serverName: 'Analytics',
+        serverConnected: true,
+        toolId: 't1',
+        name: 'search',
+        namespacedName: 'mcp.analytics.search',
+        riskLevel: 'HIGH',
+        inputSchema: {},
+      },
+    ]);
+    const meta = await listOrgToolMetadata('org1', {} as never);
+    expect(meta.map((m) => m.name)).toContain('mcp.analytics.search');
+    const mcpEntry = meta.find((m) => m.name === 'mcp.analytics.search')!;
+    expect(mcpEntry.providerType).toBe('MCP');
+    expect(mcpEntry.riskLevel).toBe('HIGH');
   });
 
   it('classifies read tools LOW risk and the propose-action tool MEDIUM', () => {

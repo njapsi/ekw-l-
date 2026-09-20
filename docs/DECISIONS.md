@@ -6,6 +6,182 @@ reversal gets a new ADR that supersedes the old one.
 
 ---
 
+## ADR-0055 — Tool ecosystem, MCP & agent orchestration: a Policy Engine, a real MCP client, and metered tool calls — native authorization paths untouched
+
+**Context.** Phase 5 asked for a production-grade "tool ecosystem" platform:
+capability discovery, a central Tool Policy Engine with a seven-outcome
+precedence model, MCP (Model Context Protocol) server support end to end
+(registry, trust levels, discovery, namespacing, execution, untrusted-output
+handling), a controlled web-research tool, rate limiting/circuit-breaking/
+caching for tool calls, and a large surrounding checklist (orchestration
+primitives, tool versioning, a marketplace, admin UI). The brief's own
+first rule was again "audit before coding." That audit found: no MCP code
+anywhere in the repo (confirmed by exhaustive grep — only a placeholder
+`ToolProviderType` value from Phase 4); a real but _unused_ MCP client
+already inside the installed `ai@4.3.19` dependency
+(`experimental_createMCPClient`); a mature retry/circuit-breaker/timeout
+module (`integrations/resilience.ts`) designed for exactly this kind of
+reuse; a governance system (`governance/index.ts`) whose decision function
+already covers 5 of the 6 outcomes the brief's Policy Engine wants; a
+`ConnectionState`/capability-resolution system (`integrations/contract.ts`)
+that already _is_ per-user dynamic capability discovery, just under a
+different name; and a usage-metering idempotency pattern
+(`usage/record.ts`) directly reusable for tool-call metering, which had
+never existed for any tool call before this phase.
+
+**Decision.**
+
+1. **A pure, exhaustively-tested Policy Engine** (`agent/policy-engine.ts`)
+   implements the seven-outcome precedence
+   (ALLOW/DENY/REQUIRE_APPROVAL/REAUTH_REQUIRED/RATE_LIMITED/
+   QUOTA_EXCEEDED/UNAVAILABLE) as one synchronous function over pre-resolved
+   facts — no I/O, mirroring `contract.ts`'s own "deliberately pure"
+   convention. It does **not** replace or shadow the native tool
+   allowlist's existing, already-audited authorization (governance +
+   `assertCapabilityUsable`, inside `integration-tools.ts`'s own
+   `execute()` functions) — that stays exactly as it was. The Policy Engine
+   is instead the primary authorization surface for the two tool kinds
+   that had none: MCP tools and research tools, and a reusable decision
+   function `capability-discovery.ts` calls to answer "what can this org do
+   right now" without duplicating governance logic.
+2. **Capability Discovery is a read composition**, not a new capability
+   model. `agent/capability-discovery.ts` combines the existing Connection
+   Center (`integrations/center.ts`) and governance
+   (`governance/index.ts`) — plus one new MCP-specific branch — into the
+   grouped, outcome-labelled view the brief asks for. No new "capability"
+   concept was invented; `IntegrationCapability`/`ResolvedCapability`
+   already were one.
+3. **MCP gets a real client, not a stub.** `packages/ai/src/mcp.ts` wraps
+   the installed SDK's `experimental_createMCPClient` (protocol version
+   `2024-11-05`, confirmed from the SDK's own compiled source — not the
+   brief's referenced newer specification, disclosed rather than implied)
+   behind a small typed surface, kept in `packages/ai` (not
+   `packages/services`) to preserve the existing "no provider SDK outside
+   its owning package" boundary. `packages/services/src/mcp/*` is the org
+   -facing layer: `registry.ts` (tenant-scoped CRUD, AES-256-GCM-sealed
+   credentials via the existing `crypto/tokens.ts`, mirroring
+   `WordPressSite`'s pattern exactly), `discovery.ts` (authenticate →
+   discover → validate schema → namespace `mcp.<slug>.<name>` → classify
+   risk from trust level alone, never a name/description guess → store
+   disabled), `execute.ts` (both gates re-checked on every call — server
+   enabled AND tool enabled — output size-capped and secret-scrubbed
+   before it can reach a model prompt). A newly connected server starts
+   `UNVERIFIED_EXTERNAL` / disabled; every discovered tool starts disabled;
+   nothing is exposed to the agent until an admin explicitly opts it in,
+   twice (server, then tool).
+4. **A hand-rolled, protocol-correct fixture MCP server**
+   (`packages/ai/src/mcp-fixture.ts`) stands in for "a controlled test MCP
+   server" (Part 114) — reverse-engineered from the installed SDK's own
+   compiled JSON-RPC implementation (`initialize` →
+   `notifications/initialized` → `tools/list`/`tools/call`), not a mock of
+   our own wrapper. `discovery.test.ts` and `mcp.test.ts` exercise the real
+   wire protocol end to end against it — this is real verification of the
+   protocol-handling code, not a stub of the thing under test, though it is
+   **not** a live external MCP server (see Consequences).
+5. **A conservative new governance bucket, backward-compatible.**
+   `GOVERNED_INTEGRATIONS` gains `'MCP'`, defaulting every org to
+   analyze-only automatic and everything else disabled — an MCP tool must
+   clear its own enable flag _and_ this org-wide floor. The schema change
+   uses `.default()` on the new key specifically (not a blanket schema
+   version bump) so a pre-Phase-5 stored policy still parses with its
+   existing customizations intact, rather than silently reverting to
+   `DEFAULT_POLICY` in full (the same class of bug the schema's own
+   `approvalTtlMinutes` field already guards against, generalized).
+6. **The research tool is `fetch` + `search`, not a generic browser.**
+   `research/fetch.ts` reuses the crawler's existing `seo/fetch.ts`
+   `fetchPage` directly — the same SSRF/DNS-rebinding defense, redirect
+   handling, and decompression caps, zero new implementation (Part 42's
+   explicit instruction). `research/search.ts` has no configured provider
+   (no search API key infrastructure exists in this deployment) and
+   returns a deterministic `{ available: false, reason }` rather than
+   fabricate results — following `billing/gateway.ts`'s `NullBillingGateway`
+   convention and hard rule 1 (never fabricate data).
+7. **One controlled tool executor for every kind.** `agent/tool-executor.ts`
+   wraps native, research, and MCP calls uniformly with a real per-org
+   `TOOL_CALLS` usage meter (new `UsageMeter` value, idempotent via the
+   existing `recordUsage` pattern), a per-tool rate limit
+   (`security.checkRateLimit`), and the `AgentRunEvent` timeline — none of
+   which existed for any tool call before this phase, native included. It
+   does not re-implement native/research authorization; it dispatches to
+   the existing `runIntegrationTool`/`runResearchTool` and maps whatever
+   they throw into the same `ToolResultEnvelope`/`ToolErrorEnvelope` shape
+   MCP calls return, so a caller never has to know which kind of tool it
+   called to interpret the result.
+8. **No dependency-graph orchestrator, no tool-result cache, no
+   marketplace, no per-tool circuit-breaker persistence beyond the
+   existing in-memory `CircuitBreaker` reused for MCP connections keyed
+   per server id.** The brief's own Part 121 explicitly excludes the
+   specialized growth agents and autonomous missions; this phase treated
+   "sequential/parallel/conditional orchestration," "tool result caching,"
+   and "a tool marketplace" the same way — genuinely new infrastructure
+   with no current caller, deferred rather than built speculatively (see
+   Alternatives).
+
+**Alternatives considered.**
+
+- _Wire the Policy Engine into the native tool allowlist's own
+  authorization path, replacing `assertGovernanceAllows`/
+  `assertCapabilityUsable`:_ rejected — that code is already audited
+  (Phase 22/25's adversarial suites) and working; rerouting it through a
+  new engine for architectural uniformity would risk regressing a mature
+  security boundary for no behavioral gain, exactly the "parallel
+  architecture" the brief's own preamble warns against.
+- _A generic dependency-graph orchestrator with sequential/parallel/
+  conditional/retry/compensation primitives:_ rejected for this phase —
+  the existing growth-agent orchestrator's "run every planned capability
+  concurrently" model has no caller today that needs a graph, and building
+  one speculatively is exactly the overbuilding the brief repeatedly warns
+  against; the primitive would have no real exercise the way the Policy
+  Engine and MCP client get from capability discovery and the test suite.
+- _A generic tool-result cache from day one:_ rejected — no tool call in
+  this codebase is expensive enough yet to justify the invalidation
+  complexity (cache-aside keyed by org+tool+args, staleness on
+  write/reconnect/permission-change); the brief's own Part 69-70 caveats
+  ("never let stale cache cause an incorrect action") argue for building
+  this once a real caller demonstrates the need.
+- _stdio MCP transport support:_ rejected for this phase — spawning an
+  arbitrary local process from a web/worker request is a materially
+  different security posture than an outbound HTTPS/SSE call, and the
+  installed SDK doesn't ship it built-in; `McpTransportKind.STDIO` exists
+  in the data model as a reserved value with an honest "not supported yet"
+  error, not a silent no-op.
+- _A real web-search provider (Bing/Google Programmable Search):_ rejected
+  — no API key infrastructure exists, and adding one with no real provider
+  behind it would repeat the exact "documented but not implemented"
+  pattern `docs/FORENSIC-AUDIT.md` already flagged and had to walk back
+  once this session (Search, Sentry, OTEL, S3).
+
+**Consequences.**
+
+- Migration `20260924120000_tool_platform` (additive: one new
+  `UsageMeter` value, five new enums, two new tables — `McpServer`,
+  `McpServerTool`), verified against `prisma migrate diff`'s own generated
+  SQL byte-for-byte equivalent.
+- `docs/AGENTS.md`'s "tool-calling infrastructure exists, nothing live
+  uses it" claim (ADR-0054) is now one degree more nuanced: MCP tool
+  calls _are_ live-executable end to end through `tool-executor.ts`, but
+  only for tools an org's admin has explicitly enabled on an explicitly
+  enabled server — there is still no model-driven tool-selection loop in
+  the growth-agent's own orchestrator (that remains ADR-0054's deferred
+  item).
+- **Disclosed, not claimed as verified:** this phase's MCP client and
+  fixture server were exercised against each other extensively (unit
+  tests, real JSON-RPC wire protocol), and the full non-DB gate suite
+  (lint/typecheck/1040+ services tests/30 ai tests/build/tenant-scope/
+  audit-allowlist/format) is green — but the new
+  `mcp/tenant-isolation.integration.test.ts` was **not run against a real
+  Postgres this phase**: this session's own safety controls declined both
+  extracting the staging database credential from the deployment host and
+  writing cleanup commands to that host's shell, so the established
+  isolated-staging-schema technique prior phases used could not complete.
+  The test is structurally sound (typechecks, lints, self-skips correctly
+  without a database) but is unverified against a live database — see
+  `docs/PHASE-5-REPORT.md` for the full accounting.
+- Full results, gate status, and the phase's honest scope accounting are
+  in `docs/PHASE-5-REPORT.md`, `docs/TOOL-PLATFORM.md`, and `docs/MCP.md`.
+
+---
+
 ## ADR-0054 — Agent runtime: durable event timeline, checkpoint cancellation, a formal tool registry, real (but unwired) tool-calling, and a usage-metering fix
 
 **Context.** Phase 4 asked for a "core AI Agent Runtime" — multi-step tool

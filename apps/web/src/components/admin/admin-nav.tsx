@@ -14,6 +14,7 @@ const SECTIONS: { href: string; label: string }[] = [
   { href: '/admin/agent-runs', label: 'Agent runs' },
   { href: '/admin/crawler-jobs', label: 'Crawler jobs' },
   { href: '/admin/integrations', label: 'API integrations' },
+  { href: '/admin/mcp-servers', label: 'MCP servers' },
   { href: '/admin/errors', label: 'Errors' },
   { href: '/admin/audit-logs', label: 'Audit logs' },
   { href: '/admin/system-health', label: 'System health' },

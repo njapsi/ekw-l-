@@ -19,6 +19,11 @@ import { AppError } from '../errors.js';
 import type { CapabilityLevel, IntegrationKey } from '../integrations/contract.js';
 import { authorize } from '../rbac/authorize.js';
 
+/** `decide()` / `assertGovernanceAllows()` accept any governed bucket — the
+ *  five real connected integrations from `contract.ts`, plus `'MCP'`, which
+ *  has no `IntegrationDescriptor` of its own (Phase 5). */
+export type GovernanceTarget = IntegrationKey | 'MCP';
+
 export const ACTION_CLASSES = [
   'analyze',
   'generate',
@@ -35,6 +40,12 @@ export const GOVERNED_INTEGRATIONS = [
   'WORDPRESS',
   'GOOGLE_SEARCH_CONSOLE',
   'WEBSITE',
+  /** Phase 5 — the bucket every connected MCP server's tools are governed
+   *  under, regardless of which server. A per-server or per-tool override
+   *  is not modelled yet (Part 77 — deferred; every MCP tool call is org-wide
+   *  governed the same way for now, on top of the tool's own explicit
+   *  enable/disable and the server's own trust level). */
+  'MCP',
 ] as const;
 export type GovernedIntegration = (typeof GOVERNED_INTEGRATIONS)[number];
 
@@ -63,14 +74,42 @@ export const AUTOMATION_TASK_TYPES = [
   'CONTENT_OPPORTUNITY',
 ] as const;
 
+/**
+ * Third-party MCP tools carry more inherent uncertainty than our own native
+ * integrations (Phase 5, Part 30 — a newly connected server defaults to
+ * UNVERIFIED_EXTERNAL trust, and every discovered tool is disabled until an
+ * admin opts it in). The org-wide governance default is correspondingly more
+ * conservative than the native-integration default below: reading through an
+ * enabled MCP tool is still automatic (the per-tool enable flag is the real
+ * gate), but Growth Agent never generates or drafts content by feeding an
+ * MCP tool's output back into a write, and any MCP-tool-driven write is
+ * disabled outright rather than merely gated behind approval — an org that
+ * wants MCP write access must explicitly loosen this in Settings → AI
+ * governance.
+ */
+const MCP_DEFAULT: IntegrationPolicy = {
+  agentAllowed: true,
+  analyze: 'automatic',
+  generate: 'disabled',
+  draft: 'disabled',
+  modify: 'disabled',
+  publish: 'disabled',
+  delete: 'disabled',
+};
+
 export const GovernancePolicySchema = z.object({
   version: z.literal(1),
-  integrations: z.object(
-    Object.fromEntries(GOVERNED_INTEGRATIONS.map((k) => [k, IntegrationPolicy])) as Record<
-      GovernedIntegration,
-      typeof IntegrationPolicy
-    >,
-  ),
+  integrations: z.object({
+    ...(Object.fromEntries(
+      GOVERNED_INTEGRATIONS.filter((k) => k !== 'MCP').map((k) => [k, IntegrationPolicy]),
+    ) as Record<Exclude<GovernedIntegration, 'MCP'>, typeof IntegrationPolicy>),
+    // `.default` — a policy stored before Phase 5 has no `MCP` key at all;
+    // it must still parse, getting the conservative default above rather
+    // than silently reverting the org's whole customized policy to
+    // `DEFAULT_POLICY` (the same forward-compatibility reasoning as
+    // `approvalTtlMinutes` below).
+    MCP: IntegrationPolicy.default(MCP_DEFAULT),
+  }),
   automation: z.object({
     /** Minimum minutes between two runs of the same automation. */
     minIntervalMinutes: z.number().int().min(15).max(10_080),
@@ -107,6 +146,7 @@ export const DEFAULT_POLICY: GovernancePolicy = {
     WORDPRESS: { ...base },
     GOOGLE_SEARCH_CONSOLE: { ...base, generate: 'disabled', draft: 'disabled' },
     WEBSITE: { ...base },
+    MCP: { ...MCP_DEFAULT },
   },
   automation: { minIntervalMinutes: 60, allowedTaskTypes: [...AUTOMATION_TASK_TYPES] },
   approvalTtlMinutes: 10_080,
@@ -210,7 +250,7 @@ export type GovernanceDecision =
  */
 export function decide(
   policy: GovernancePolicy,
-  integration: IntegrationKey,
+  integration: GovernanceTarget,
   cls: ActionClass,
   opts: { viaAgent: boolean },
 ): GovernanceDecision {
@@ -235,7 +275,7 @@ export function decide(
 
 export async function assertGovernanceAllows(
   organizationId: string,
-  integration: IntegrationKey,
+  integration: GovernanceTarget,
   cls: ActionClass,
   opts: { viaAgent: boolean },
   db: Db = prisma,

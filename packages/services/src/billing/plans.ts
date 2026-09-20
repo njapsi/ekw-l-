@@ -69,6 +69,7 @@ export const PLAN_CATALOG: Record<BillingTier, PlanDefinition> = {
       REPORTS: 0,
       CONTENT_GENERATIONS: 10,
       SEATS: 1,
+      TOOL_CALLS: 200,
     },
     features: { ...NO_FEATURES },
   },
@@ -88,6 +89,7 @@ export const PLAN_CATALOG: Record<BillingTier, PlanDefinition> = {
       REPORTS: 20,
       CONTENT_GENERATIONS: 150,
       SEATS: 2,
+      TOOL_CALLS: 4_000,
     },
     features: { ...NO_FEATURES, exports: true },
   },
@@ -107,6 +109,7 @@ export const PLAN_CATALOG: Record<BillingTier, PlanDefinition> = {
       REPORTS: 200,
       CONTENT_GENERATIONS: 1_000,
       SEATS: 5,
+      TOOL_CALLS: 25_000,
     },
     features: {
       ...NO_FEATURES,
@@ -132,6 +135,7 @@ export const PLAN_CATALOG: Record<BillingTier, PlanDefinition> = {
       REPORTS: 1_000,
       CONTENT_GENERATIONS: 5_000,
       SEATS: 15,
+      TOOL_CALLS: 150_000,
     },
     features: {
       ...NO_FEATURES,
@@ -159,6 +163,7 @@ export const PLAN_CATALOG: Record<BillingTier, PlanDefinition> = {
       REPORTS: null,
       CONTENT_GENERATIONS: null,
       SEATS: null,
+      TOOL_CALLS: null,
     },
     features: {
       exports: true,

@@ -1209,6 +1209,86 @@ password.ts` hashes with salted scrypt via `node:crypto` — no bcrypt/
   schema. See `docs/AGENT-RUNTIME.md`, `docs/PHASE-4-REPORT.md`,
   `docs/AGENTS.md` (updated), `docs/AI-ARCHITECTURE.md` (updated),
   ADR-0054.
+- **Tool ecosystem, MCP & agent orchestration** ✅ (operator's "Phase 5"):
+  audited first — found no MCP code anywhere in the repo (confirmed by
+  exhaustive grep), a real-but-unused MCP client already inside the
+  installed `ai@4.3.19` dependency, a mature retry/circuit-breaker module
+  (`integrations/resilience.ts`) built for exactly this reuse, and a
+  governance/connection-state system that already covered most of the
+  brief's "capability discovery"/"policy engine" asks under different
+  names. **New**: a pure, exhaustively-tested **Policy Engine**
+  (`agent/policy-engine.ts`) with the seven-outcome precedence
+  (ALLOW/DENY/REQUIRE_APPROVAL/REAUTH_REQUIRED/RATE_LIMITED/
+  QUOTA_EXCEEDED/UNAVAILABLE) — the native tool allowlist's own,
+  already-audited authorization (`assertGovernanceAllows`/
+  `assertCapabilityUsable`) is untouched and unduplicated; the engine is
+  the real authorization path for the two tool kinds that had none.
+  **Capability Discovery** (`agent/capability-discovery.ts`) — a read
+  composition over the Connection Center + governance, no new capability
+  model. **A real MCP client and server registry**:
+  `packages/ai/src/mcp.ts` wraps the installed SDK's
+  `experimental_createMCPClient` (protocol `2024-11-05`, confirmed from
+  its compiled source — disclosed as older than the brief's referenced
+  spec, not overstated); `packages/services/src/mcp/*` — tenant-scoped
+  registry (AES-256-GCM-sealed credentials, mirroring `WordPressSite`),
+  discovery (authenticate → discover → validate → namespace
+  `mcp.<slug>.<name>` → classify risk **from trust level alone, never a
+  name/description guess** → store disabled), and execution (both
+  server-enabled and tool-enabled gates re-checked from the database on
+  every call, output size-capped and secret-scrubbed). A newly connected
+  server starts `UNVERIFIED_EXTERNAL`/disabled; every discovered tool
+  starts disabled — nothing is exposed to the agent until an admin opts
+  it in twice. `packages/ai/src/mcp-fixture.ts` — a hand-rolled,
+  protocol-correct fixture MCP server (reverse-engineered from the
+  installed SDK's own compiled JSON-RPC implementation, not a mock of our
+  own wrapper) stands in for "a controlled test MCP server"; writing its
+  malformed-schema test found a real, useful behavior (the SDK's own
+  response-schema validation rejects a whole `tools/list` call if any one
+  tool's schema is fundamentally malformed, rather than silently
+  accepting a corrupted response — safer than the test originally
+  assumed). **Two research tools** (`research.fetch`/`research.search`,
+  READ-only, no `execute`/`browse` tool exists or is planned):
+  `research.fetch` reuses the crawler's own `seo/fetch.ts` SSRF-safe
+  client directly — zero new SSRF implementation; `research.search` has
+  no configured provider (no search-API-key infrastructure exists in this
+  deployment) and returns a deterministic `{available:false, reason}`
+  rather than fabricate results. **One unified Tool Executor**
+  (`agent/tool-executor.ts`) wraps native/research/MCP calls with a real
+  per-org `TOOL_CALLS` usage meter (new, idempotent) and a per-tool rate
+  limit — neither existed for any tool call, native included, before this
+  phase — plus the `AgentRunEvent` timeline, without re-implementing
+  native/research authorization. A new governance bucket (`MCP`,
+  conservative default: analyze automatic, everything else disabled),
+  added via `.default()` so a pre-Phase-5 stored policy still parses with
+  its customizations intact rather than reverting to `DEFAULT_POLICY`.
+  New read APIs `GET /api/agent/tools` / `GET /api/agent/capabilities`;
+  MCP admin mutations are Server Actions
+  (`apps/web/src/server/mcp-actions.ts`), matching the existing
+  WordPress/TikTok/YouTube convention, not a new REST surface. UI:
+  `/app/integrations/mcp` (add/test/enable/trust-level/remove) +
+  cross-org read-only `/admin/mcp-servers`. Migration
+  `20260924120000_tool_platform` (additive: one new `UsageMeter` value,
+  five enums, `McpServer`/`McpServerTool`), diffed equal to Prisma's own
+  generated SQL. **Deliberately not done, matching the brief's own "do not
+  overbuild"**: no dependency-graph orchestrator (no current caller needs
+  one), no tool-result cache, no stdio MCP transport (reserved value,
+  honest "not supported" error), no real search provider, and — same
+  disclosed pattern as Phase 4's tool-calling primitive — **none of this
+  is wired into the live `growth-agent` orchestrator's planner or turn
+  loop yet**. Gates green: lint 14/14, typecheck 14/14, **`packages/services`
+  1041 tests** (+93) + **`packages/ai` 30 tests** (+5), web build, tenant
+  -scope + audit-allowlist clean. **Verification limit, disclosed**: a new
+  `mcp/tenant-isolation.integration.test.ts` was written (typechecks,
+  lints, self-skips correctly without a database) but could **not** be run
+  against a real Postgres this phase — this session's own safety controls
+  declined both extracting the staging database credential from the
+  deployment host and writing cleanup commands to that host's shell, so
+  the isolated-staging-schema technique prior phases used could not
+  complete; the VPS's `/opt/ga-verify` scratch checkout may have leftover
+  Phase 5 files extracted on top of a stash from this attempt and was left
+  as-is rather than risk a destructive fix. See `docs/TOOL-PLATFORM.md`,
+  `docs/MCP.md`, `docs/PHASE-5-REPORT.md`, `docs/AGENTS.md` (updated),
+  `docs/AI-ARCHITECTURE.md` (updated), ADR-0055.
 - **Still outstanding:** Postgres **RLS** (ADR-0035, re-affirmed in
   ADR-0052 — application-layer scoping + the CI tenant-scope lint +
   integration tests, now actually running, remain the accepted mitigation);
@@ -1224,10 +1304,19 @@ password.ts` hashes with salted scrypt via `node:crypto` — no bcrypt/
   re-audit of the Phase 3 UI changes (spot-verified only); a screenshot
   -diff visual-regression baseline; roadmap "Phase 10" leftovers
   (recommendation lifecycle UI, task board, notifications + digests);
-  wiring the now-real `packages/ai` tool-calling support into an actual
-  live `growth-agent` capability (the infrastructure and tests exist —
-  see ADR-0054/`docs/AGENT-RUNTIME.md` §6 — nothing in the live
-  orchestrator path calls it yet); activating the worker's `agent-run`
+  wiring the now-real `packages/ai` tool-calling support, the Phase 5
+  Policy Engine / Capability Discovery / Tool Executor, and MCP into an
+  actual live `growth-agent` capability (the infrastructure and tests
+  exist for all of it — see ADR-0054/ADR-0055, `docs/AGENT-RUNTIME.md` §6,
+  `docs/TOOL-PLATFORM.md`, `docs/MCP.md` — nothing in the live orchestrator
+  path calls any of it yet); running `mcp/tenant-isolation.integration.test.ts`
+  against a real database (written, typechecks, self-skips correctly, but
+  unverified against Postgres — see the Phase 5 bullet above); connecting
+  a real external MCP server (only a hand-rolled protocol-correct fixture
+  has been tested against); a real web-search provider for `research.search`
+  (no API key infrastructure exists); a dependency-graph orchestrator, a
+  tool-result cache, and stdio MCP transport (all deliberately deferred,
+  ADR-0055); activating the worker's `agent-run`
   BullMQ queue with a real background-run product surface (the queue and
   processor are fully built and idle, per ADR-0054); a per-turn wall-clock
   `MAX_RUNTIME`/`TIMED_OUT` (the status value is reserved, nothing sets it

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { USAGE_METERS } from './meters.js';
 import { getUsageSummary, refreshUsageCounters } from './summary.js';
 
 function makeDb(
@@ -105,7 +106,7 @@ describe('refreshUsageCounters (self-healing rollup)', () => {
     });
     await refreshUsageCounters('org1', db as never);
     // one upsert per meter
-    expect(db._upserts.length).toBe(8);
+    expect(db._upserts.length).toBe(USAGE_METERS.length);
     const ai = db._upserts.find(
       (u: any) => u.where.organizationId_meter_periodStart.meter === 'AI_TOKENS',
     );

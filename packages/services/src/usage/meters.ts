@@ -18,6 +18,7 @@ export const USAGE_METERS = [
   'REPORTS',
   'CONTENT_GENERATIONS',
   'SEATS',
+  'TOOL_CALLS',
 ] as const satisfies readonly UsageMeter[];
 
 export type MeterKey = (typeof USAGE_METERS)[number];
@@ -89,6 +90,13 @@ export const METERS: Record<MeterKey, MeterInfo> = {
     unit: 'seats',
     kind: 'gauge',
     description: 'Active members of the organization.',
+  },
+  TOOL_CALLS: {
+    meter: 'TOOL_CALLS',
+    label: 'Tool calls',
+    unit: 'calls',
+    kind: 'counter',
+    description: 'Native, research and MCP tool invocations the agent runtime dispatched.',
   },
 };
 

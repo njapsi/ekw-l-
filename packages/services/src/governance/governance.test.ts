@@ -42,6 +42,29 @@ describe('policy schema', () => {
   it('accepts the defaults', () => {
     expect(GovernancePolicySchema.safeParse(DEFAULT_POLICY).success).toBe(true);
   });
+
+  it('parses a pre-Phase-5 stored policy with no MCP key, defaulting it conservatively', () => {
+    const pre = clone() as { integrations: Record<string, unknown> };
+    delete pre.integrations.MCP;
+    const parsed = GovernancePolicySchema.safeParse(pre);
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(parsed.data.integrations.MCP).toEqual(DEFAULT_POLICY.integrations.MCP);
+      // Every custom (non-MCP) field from the pre-Phase-5 policy survives —
+      // this must be a fill-in of the missing key, not a fallback to the
+      // whole DEFAULT_POLICY.
+      expect(parsed.data.integrations.WORDPRESS).toEqual(DEFAULT_POLICY.integrations.WORDPRESS);
+    }
+  });
+
+  it('the MCP default never allows generate/draft/modify/publish/delete automatically or even unconditionally', () => {
+    const mcp = DEFAULT_POLICY.integrations.MCP;
+    expect(mcp.generate).toBe('disabled');
+    expect(mcp.draft).toBe('disabled');
+    expect(mcp.modify).toBe('disabled');
+    expect(mcp.publish).toBe('disabled');
+    expect(mcp.delete).toBe('disabled');
+  });
 });
 
 describe('decide', () => {

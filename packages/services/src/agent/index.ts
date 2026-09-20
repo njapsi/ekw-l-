@@ -12,3 +12,7 @@ export * from './tool-registry.js';
 export * from './events.js';
 export * from './cancellation.js';
 export * from './runs.js';
+export * from './policy-engine.js';
+export * from './capability-discovery.js';
+export * from './tool-envelope.js';
+export * from './tool-executor.js';

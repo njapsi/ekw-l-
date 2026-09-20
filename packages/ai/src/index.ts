@@ -6,6 +6,8 @@ export * from './roles.js';
 export * from './resilient.js';
 export * from './fallback.js';
 export * from './providers/index.js';
+export * from './mcp.js';
+export * from './mcp-fixture.js';
 
 import { ProviderRegistry, defaultsFromEnv } from './registry.js';
 import { anthropicProvider, googleProvider, openaiProvider } from './providers/index.js';

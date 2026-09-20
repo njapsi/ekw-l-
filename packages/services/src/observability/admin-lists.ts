@@ -661,3 +661,78 @@ export async function listAuditLogs(
     pageSize,
   );
 }
+
+// --- MCP servers (Phase 5) --------------------------------------------
+
+export interface McpServerAdminRow {
+  id: string;
+  organizationId: string;
+  orgSlug: string | null;
+  name: string;
+  endpoint: string;
+  trustLevel: string;
+  status: string;
+  enabled: boolean;
+  toolCount: number;
+  enabledToolCount: number;
+  lastCheckAt: string | null;
+  lastError: string | null;
+  createdAt: string;
+}
+
+/** Cross-org, read-only view for platform staff (Part 92). Never selects a
+ *  credential column. */
+export async function listMcpServersAdmin(
+  db: Db = prisma,
+  opts: { page?: number; status?: string; trustLevel?: string } = {},
+): Promise<Page<McpServerAdminRow>> {
+  const { skip, take, page, pageSize } = paging(opts);
+  const where: Prisma.McpServerWhereInput = {};
+  if (opts.status) where.status = opts.status as Prisma.McpServerWhereInput['status'];
+  if (opts.trustLevel) {
+    where.trustLevel = opts.trustLevel as Prisma.McpServerWhereInput['trustLevel'];
+  }
+  const [rows, total] = await Promise.all([
+    db.mcpServer.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      skip,
+      take,
+      select: {
+        id: true,
+        organizationId: true,
+        organization: { select: { slug: true } },
+        name: true,
+        endpoint: true,
+        trustLevel: true,
+        status: true,
+        enabled: true,
+        lastCheckAt: true,
+        lastError: true,
+        createdAt: true,
+        tools: { select: { enabled: true } },
+      },
+    }),
+    db.mcpServer.count({ where }),
+  ]);
+  return pageResult(
+    rows.map((s) => ({
+      id: s.id,
+      organizationId: s.organizationId,
+      orgSlug: s.organization?.slug ?? null,
+      name: s.name,
+      endpoint: s.endpoint,
+      trustLevel: s.trustLevel,
+      status: s.status,
+      enabled: s.enabled,
+      toolCount: s.tools.length,
+      enabledToolCount: s.tools.filter((t) => t.enabled).length,
+      lastCheckAt: s.lastCheckAt?.toISOString() ?? null,
+      lastError: s.lastError ? scrubSecrets(s.lastError).slice(0, 300) : null,
+      createdAt: s.createdAt.toISOString(),
+    })),
+    total,
+    page,
+    pageSize,
+  );
+}

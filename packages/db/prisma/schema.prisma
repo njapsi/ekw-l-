@@ -211,6 +211,8 @@ model Organization {
   integrationActions        IntegrationActionRequest[]
   apiKeys                   ApiKey[]
   aiGovernancePolicy        AiGovernancePolicy?
+  mcpServers                McpServer[]
+  mcpServerTools            McpServerTool[]
 
   // Set when an OWNER requested deletion; the org is hidden immediately and a
   // grace-period purge job hard-deletes it (cascading every tenant row) after
@@ -1576,6 +1578,9 @@ enum UsageMeter {
   REPORTS
   CONTENT_GENERATIONS
   SEATS
+  /// Phase 5 — every native, research, or MCP tool call the agent runtime
+  /// dispatches through the tool executor (agent/tool-executor.ts).
+  TOOL_CALLS
 }
 
 /// Where an `Entitlement` row came from. `PLAN` rows are derived from the
@@ -2234,6 +2239,109 @@ model IntegrationActionRequest {
 
   @@index([organizationId, status, createdAt])
   @@map("integration_action_requests")
+}
+
+// ===========================================================================
+// Phase 5 — tool ecosystem, MCP & agent orchestration (ADR-0055)
+// ===========================================================================
+
+enum McpTransportKind {
+  SSE
+  STDIO
+}
+
+enum McpAuthKind {
+  NONE
+  API_KEY
+  BEARER_TOKEN
+}
+
+/// How much Growth Agent trusts a connected MCP server's tools by default
+/// (Phase 5, Part 30). A newly added external server always starts
+/// UNVERIFIED_EXTERNAL — every discovered tool is disabled until an admin
+/// explicitly enables it (Part 31/93); trust level never auto-promotes.
+enum McpTrustLevel {
+  INTERNAL
+  TRUSTED
+  VERIFIED_EXTERNAL
+  UNVERIFIED_EXTERNAL
+}
+
+enum McpServerStatus {
+  PENDING
+  CONNECTED
+  DEGRADED
+  ERROR
+  DISABLED
+}
+
+enum McpToolRiskLevel {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+/// An organization-configured third-party MCP server (Phase 5, Parts 28-40).
+/// A credential is sealed the same way OAuth tokens are (AES-256-GCM,
+/// crypto/tokens.ts) — never stored or logged in plaintext, and `authKind
+/// = NONE` leaves every credential field null. Connecting a server never
+/// grants it anything by itself: every discovered tool starts disabled
+/// (see McpServerTool).
+model McpServer {
+  id                String           @id @default(cuid())
+  organizationId    String
+  name              String
+  endpoint          String
+  transport         McpTransportKind @default(SSE)
+  authKind          McpAuthKind      @default(NONE)
+  credentialCipher  String?          @db.Text
+  credentialIv      String?
+  credentialAuthTag String?
+  keyId             String?
+  trustLevel        McpTrustLevel    @default(UNVERIFIED_EXTERNAL)
+  status            McpServerStatus  @default(PENDING)
+  enabled           Boolean          @default(false)
+  protocolVersion   String?
+  serverVersion     String?
+  lastError         String?
+  lastCheckAt       DateTime?
+  lastCheckOk       Boolean?
+  createdById       String?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  organization Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  tools        McpServerTool[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+  @@map("mcp_servers")
+}
+
+/// One discovered tool from an MCP server's `tools/list`, namespaced as
+/// `mcp.<server-slug>.<name>` so it can never collide with a native tool
+/// (Part 32). `enabled` defaults to false — discovery alone never exposes a
+/// tool to any agent run (Part 31/93); an admin must turn it on explicitly.
+model McpServerTool {
+  id             String           @id @default(cuid())
+  mcpServerId    String
+  organizationId String
+  name           String
+  namespacedName String
+  description    String?          @db.Text
+  inputSchema    Json
+  riskLevel      McpToolRiskLevel @default(HIGH)
+  enabled        Boolean          @default(false)
+  discoveredAt   DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  server       McpServer    @relation(fields: [mcpServerId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([mcpServerId, name])
+  @@index([organizationId])
+  @@map("mcp_server_tools")
 }
 
 // ---------------------------------------------------------------------------
