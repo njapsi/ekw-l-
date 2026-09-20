@@ -24,6 +24,17 @@
   --input: 214 32% 91%;
   --ring: 244 76% 58%;
   --radius: 0.6rem;
+
+  /* Semantic status tokens (Phase 3, Part 40/31): a status is never conveyed
+     by color alone anywhere in the app, but the color still has to be a real
+     token — not a hardcoded Tailwind shade — so it can invert correctly in
+     dark mode and so Badge/Alert/notification styling stays in one place. */
+  --success: 152 60% 30%;
+  --success-foreground: 0 0% 100%;
+  --warning: 38 92% 32%;
+  --warning-foreground: 0 0% 100%;
+  --info: 217 91% 40%;
+  --info-foreground: 0 0% 100%;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -45,10 +56,23 @@
     --border: 217 33% 20%;
     --input: 217 33% 22%;
     --ring: 244 76% 66%;
+    --success: 152 55% 68%;
+    --success-foreground: 152 60% 10%;
+    --warning: 38 92% 68%;
+    --warning-foreground: 38 60% 12%;
+    --info: 217 91% 72%;
+    --info-foreground: 217 60% 12%;
   }
 }
 
-:root[data-theme='dark'] {
+/* `data-theme="dark"` and `.dark` are set together by the theme toggle
+   (`ThemeProvider`) — the attribute is this file's own selector contract,
+   the class is what the Tailwind preset's `darkMode: ['class']` expects for
+   every `dark:` utility already written against Tailwind's own convention.
+   Kept as two selectors sharing one declaration block rather than one
+   compound selector so either alone is enough to force dark. */
+:root[data-theme='dark'],
+:root.dark {
   --background: 222 47% 8%;
   --foreground: 210 40% 98%;
   --card: 222 47% 10%;
@@ -66,6 +90,41 @@
   --border: 217 33% 20%;
   --input: 217 33% 22%;
   --ring: 244 76% 66%;
+  --success: 152 55% 68%;
+  --success-foreground: 152 60% 10%;
+  --warning: 38 92% 68%;
+  --warning-foreground: 38 60% 12%;
+  --info: 217 91% 72%;
+  --info-foreground: 217 60% 12%;
+}
+
+/* An explicit "light" choice must win over a `.dark` class left stale by a
+   prior toggle state (the inline anti-FOUC script always keeps them in sync,
+   but this is the CSS-level guarantee). */
+:root[data-theme='light'] {
+  --background: 0 0% 100%;
+  --foreground: 222 47% 11%;
+  --card: 0 0% 100%;
+  --card-foreground: 222 47% 11%;
+  --primary: 244 76% 58%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 210 40% 96%;
+  --secondary-foreground: 222 47% 11%;
+  --muted: 210 40% 96%;
+  --muted-foreground: 215 16% 40%;
+  --accent: 244 76% 96%;
+  --accent-foreground: 244 76% 32%;
+  --destructive: 0 72% 51%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 214 32% 91%;
+  --input: 214 32% 91%;
+  --ring: 244 76% 58%;
+  --success: 152 60% 30%;
+  --success-foreground: 0 0% 100%;
+  --warning: 38 92% 32%;
+  --warning-foreground: 0 0% 100%;
+  --info: 217 91% 40%;
+  --info-foreground: 0 0% 100%;
 }
 
 /* Collapse every animation/transition to near-zero instead of `none`: this

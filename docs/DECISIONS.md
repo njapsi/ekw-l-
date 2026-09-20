@@ -6,6 +6,83 @@ reversal gets a new ADR that supersedes the old one.
 
 ---
 
+## ADR-0053 — Design-system-first UI redesign; dark mode fixed at the token layer; Missions as a read model, not a new entity
+
+**Context.** Phase 3 asked for an enterprise-grade UI/UX overhaul across
+~40 screens, explicitly forbidding backend/database/auth rebuilds (Part 1).
+An audit of the existing `packages/ui` found a real foundation (Button,
+Card, Badge, Dialog, DropdownMenu, Tabs, EmptyState, PageHeader, all
+consistently used) but real gaps: the Tailwind preset declared
+`darkMode: ['class']` while `styles.css` only ever varied by media query —
+no code ever set the `.dark` class, so existing `dark:` utilities were dead;
+no Tooltip/Popover/Command/Toast/Progress primitives; no chart or motion
+library; the dashboard was three placeholder stat cards; the AI Agent chat
+had a single-line status string, no multi-step timeline.
+
+**Decision.**
+
+1. **Fix the design system once, let every page inherit it**, rather than
+   hand-redesigning 40 pages that already share `Card`/`Badge`/`PageHeader`.
+   Dark mode is fixed at the CSS-variable layer (`data-theme` and `.dark`
+   set together by one `ThemeProvider`), so every existing and future
+   consumer of those tokens gets correct dark mode for free.
+2. **New primitives follow the existing file-per-component, thin-Radix
+   -wrapper pattern** exactly (Tooltip, Popover, Progress, Switch, Toast,
+   Command) — no new architectural pattern introduced for them.
+3. **No chart or animation library.** Consistent with this codebase's
+   established convention of hand-rolling before adding a dependency (the
+   PDF writer, the cron parser, the Stripe REST adapter), Parts 20/41/39 are
+   met with existing Tailwind utilities.
+4. **Growth Missions (Part 36) is a presentational aggregation**, not a new
+   `Mission` table. Part 1 forbids backend changes; a persisted Mission
+   entity with fabricated status would also risk violating the master
+   instruction's no-fake-data rule before it has anything real to show. It
+   composes existing connection state and automation rules instead.
+5. **One new backend surface, deliberately minimal**: `dashboard.
+getDashboardSummary`, a pure read composition over four already-existing
+   tenant-scoped reads plus one new scoped query, to give the dashboard real
+   content instead of the `—` placeholders it showed before.
+6. **The agent run timeline is ephemeral**, sourced live from the
+   orchestrator's real SSE stage events, not persisted or replayed — the
+   data model has no stage-by-stage record today, and inventing one is a
+   backend change out of this phase's scope.
+7. **Approval execution stays on its own page.** The chat now shows a
+   richer description of what needs approval, but approve/reject remains on
+   `/app/integrations/approvals`, where the permission check and exactly
+   -once claim already live — duplicating that logic into the chat would
+   be new attack surface for no verified benefit this phase.
+
+**Alternatives considered.**
+
+- _Hand-redesign every listed page:_ rejected as unrealistic for one phase
+  and worse engineering than fixing the shared primitives once.
+- _A new `Mission` schema now:_ rejected (point 4) — Part 1's own
+  constraint, and nothing to persist yet that isn't derivable from existing
+  tables.
+- _Adding a chart/motion library:_ rejected as an unjustified dependency
+  for what Tailwind utilities already cover at this phase's scope.
+- _Embedding approve/reject in the chat:_ rejected (point 7) — no verified
+  need, real risk of duplicating a security-sensitive code path.
+
+**Consequences.**
+
+- New deps: `@radix-ui/react-{tooltip,popover,progress,switch,toast}`,
+  `cmdk`. No schema migration.
+- A genuine production-build-breaking bug was found and fixed before
+  release: `cmdk@1.1.1` exports its sub-components as flat named exports,
+  not `Command.X` properties like older versions — every page would have
+  failed to build had this shipped. See `docs/PHASE-3-REPORT.md` §9.
+- A real mobile-UX bug was found and fixed via live testing: the mobile
+  "More" drawer inherited the desktop sidebar's persisted collapse
+  preference, rendering as an unlabeled icon-only dead end on a phone. Fixed
+  by making the mobile drawer always render expanded regardless of the
+  desktop preference.
+- Full results, live-verification method, and an honest per-checklist-item
+  accounting of what was and wasn't completed are in
+  `docs/PHASE-3-REPORT.md`.
+
+---
+
 ## ADR-0052 — Enterprise identity on the existing Auth.js: capability RBAC, server-side session registry, API keys, AI governance
 
 **Context.** Phase 2 asked for multi-tenant enterprise identity:

@@ -3,6 +3,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { SessionProvider } from 'next-auth/react';
+import { ThemeProvider, TooltipProvider, Toaster } from '@growth-agent/ui';
 
 /** Best-effort client + edge error reporting (FORENSIC-AUDIT M-4). */
 export function reportClientError(input: {
@@ -72,8 +73,15 @@ export function Providers({ children }: { children: ReactNode }) {
   useGlobalErrorReporting();
 
   return (
-    <SessionProvider>
-      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
-    </SessionProvider>
+    <ThemeProvider>
+      <SessionProvider>
+        <QueryClientProvider client={queryClient}>
+          <TooltipProvider delayDuration={300}>
+            {children}
+            <Toaster />
+          </TooltipProvider>
+        </QueryClientProvider>
+      </SessionProvider>
+    </ThemeProvider>
   );
 }

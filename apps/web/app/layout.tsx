@@ -5,6 +5,7 @@ import { Hanken_Grotesk, IBM_Plex_Mono } from 'next/font/google';
 // production deploy fails here with a readable field list instead of at the
 // first request (FORENSIC-AUDIT D-3 / M-10).
 import '@growth-agent/services/config';
+import { ThemeScript } from '@growth-agent/ui';
 import { Providers } from '@/components/providers';
 import './globals.css';
 
@@ -45,6 +46,9 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en" suppressHydrationWarning className={`${sans.variable} ${mono.variable}`}>
+      <head>
+        <ThemeScript />
+      </head>
       <body className="min-h-screen font-sans antialiased">
         <Providers>{children}</Providers>
       </body>

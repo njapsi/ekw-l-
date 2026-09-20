@@ -40,3 +40,31 @@ export {
 export { Tabs, TabsList, TabsTrigger, TabsContent } from './components/tabs.js';
 export { EmptyState, type EmptyStateProps } from './components/empty-state.js';
 export { PageHeader, type PageHeaderProps } from './components/page-header.js';
+export { ThemeProvider, ThemeScript, useTheme, type ThemePreference } from './theme.js';
+export { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from './components/tooltip.js';
+export { Popover, PopoverTrigger, PopoverContent, PopoverAnchor } from './components/popover.js';
+export { Progress } from './components/progress.js';
+export { AgentRunTimeline, type AgentTimelineStep } from './components/agent-timeline.js';
+export { Switch } from './components/switch.js';
+export {
+  CommandDialog,
+  CommandInput,
+  CommandList,
+  CommandEmpty,
+  CommandGroup,
+  CommandItem,
+  CommandSeparator,
+  CommandShortcut,
+} from './components/command.js';
+export {
+  ToastProvider,
+  ToastViewport,
+  Toast,
+  ToastTitle,
+  ToastDescription,
+  ToastAction,
+  ToastClose,
+  useToast,
+  toast,
+  Toaster,
+} from './components/toast.js';

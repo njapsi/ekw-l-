@@ -25,6 +25,7 @@ export * as security from './security/index.js';
 export * as config from './config/env.js';
 export { recordAudit, type AuditInput } from './audit/index.js';
 export * as audit from './audit/index.js';
+export * as dashboard from './dashboard/index.js';
 export {
   authorize,
   can,

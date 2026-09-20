@@ -2,8 +2,16 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Button, Input } from '@growth-agent/ui';
+import { AgentRunTimeline, Button, Input, type AgentTimelineStep } from '@growth-agent/ui';
 import { type AgentBlocks, MessageBlocks } from './message-blocks';
+
+const STAGE_LABEL: Record<string, string> = {
+  gathering: 'Reading your connected data',
+  planning: 'Choosing specialists',
+  planned: 'Plan ready',
+  synthesizing: 'Combining the results',
+  writing: 'Writing the answer',
+};
 
 interface ChatMessage {
   id: string;
@@ -32,7 +40,7 @@ export function AgentChat({
   const router = useRouter();
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [input, setInput] = useState('');
-  const [status, setStatus] = useState<string | null>(null);
+  const [timeline, setTimeline] = useState<AgentTimelineStep[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const convoRef = useRef(conversationId);
@@ -40,7 +48,7 @@ export function AgentChat({
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, status]);
+  }, [messages, timeline]);
 
   async function send(text: string) {
     const message = text.trim();
@@ -60,7 +68,7 @@ export function AgentChat({
       userMsg,
       { id: asstId, role: 'ASSISTANT', content: '', blocks: null, streaming: true },
     ]);
-    setStatus('Starting…');
+    setTimeline([{ id: 'start', label: 'Starting…', status: 'active' }]);
 
     try {
       const res = await fetch('/api/agent/stream', {
@@ -98,14 +106,28 @@ export function AgentChat({
               }
             | { type: 'error'; message: string };
 
-          if (ev.type === 'status') setStatus(ev.detail ?? ev.stage);
-          else if (ev.type === 'token') {
-            setStatus(null);
+          if (ev.type === 'status') {
+            // 'running' fires once per specialist capability with a real,
+            // distinct detail (e.g. "Running SEO Auditor") — each becomes its
+            // own step rather than overwriting the last, since several can
+            // run in one turn. Every other stage is a one-time milestone.
+            const label =
+              ev.stage === 'running'
+                ? (ev.detail ?? 'Running a specialist')
+                : (STAGE_LABEL[ev.stage] ?? ev.detail ?? ev.stage);
+            const id = ev.stage === 'running' ? `running-${label}` : ev.stage;
+            setTimeline((t) => {
+              const done = t.map((s) => ({ ...s, status: 'done' as const }));
+              if (done.some((s) => s.id === id)) return done;
+              return [...done, { id, label, status: 'active' as const }];
+            });
+          } else if (ev.type === 'token') {
             setMessages((m) =>
               m.map((x) => (x.id === asstId ? { ...x, content: x.content + ev.text } : x)),
             );
           } else if (ev.type === 'done') {
             newConversationId = ev.conversationId;
+            setTimeline((t) => t.map((s) => ({ ...s, status: 'done' as const })));
             setMessages((m) =>
               m.map((x) =>
                 x.id === asstId
@@ -115,6 +137,9 @@ export function AgentChat({
             );
           } else if (ev.type === 'error') {
             setError(ev.message);
+            setTimeline((t) =>
+              t.map((s) => (s.status === 'active' ? { ...s, status: 'error' as const } : s)),
+            );
             setMessages((m) => m.filter((x) => x.id !== asstId));
           }
         }
@@ -132,7 +157,7 @@ export function AgentChat({
       setMessages((m) => m.filter((x) => x.id !== asstId));
     } finally {
       setBusy(false);
-      setStatus(null);
+      setTimeline([]);
     }
   }
 
@@ -186,14 +211,9 @@ export function AgentChat({
           </div>
         ))}
 
-        {status ? (
-          <div
-            role="status"
-            aria-live="polite"
-            className="text-muted-foreground flex items-center gap-2 text-xs"
-          >
-            <span className="border-muted-foreground/40 border-t-foreground h-3 w-3 animate-spin rounded-full border" />
-            {status}
+        {timeline.length > 0 ? (
+          <div role="status" aria-live="polite" className="bg-card rounded-lg border p-3">
+            <AgentRunTimeline steps={timeline} />
           </div>
         ) : null}
         <div ref={bottomRef} />

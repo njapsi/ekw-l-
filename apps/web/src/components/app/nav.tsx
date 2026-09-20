@@ -1,6 +1,5 @@
 import type { ComponentType } from 'react';
 import {
-  Bell,
   Bot,
   CheckSquare,
   Clock,
@@ -14,8 +13,9 @@ import {
   Music2,
   PenSquare,
   Plug,
-  Settings,
   ShieldCheck,
+  Target,
+  User,
   Users,
   Youtube,
 } from 'lucide-react';
@@ -31,7 +31,11 @@ export interface NavGroup {
   items: NavItem[];
 }
 
-/** Grouped navigation (Phase 2, Part 27). Every destination existed before. */
+/** Grouped navigation (Phase 2 Part 27, redesigned Phase 3 Part 3/33). Every
+ * destination existed before this phase; grouping and icons changed, no
+ * feature was removed. Notifications moved to the header bell (Part 4/21's
+ * own reference pattern), which remains the discoverable entry point
+ * (`/app/notifications` is still a real route, just not duplicated here). */
 export const APP_NAV_GROUPS: NavGroup[] = [
   {
     label: null,
@@ -47,15 +51,15 @@ export const APP_NAV_GROUPS: NavGroup[] = [
       { href: '/app/tiktok', label: 'TikTok', icon: Music2 },
       { href: '/app/seo', label: 'SEO', icon: Gauge },
       { href: '/app/integrations/wordpress', label: 'WordPress', icon: PenSquare },
-      { href: '/app/content', label: 'Content', icon: Lightbulb },
       { href: '/app/monetization', label: 'Monetization', icon: DollarSign },
     ],
   },
   {
-    label: 'Operations',
+    label: 'Work',
     items: [
-      { href: '/app/automations', label: 'Automations', icon: Clock },
+      { href: '/app/content', label: 'Content', icon: Lightbulb },
       { href: '/app/tasks', label: 'Tasks', icon: CheckSquare },
+      { href: '/app/automations', label: 'Automations', icon: Clock },
       { href: '/app/reports', label: 'Reports', icon: FileText },
       { href: '/app/integrations/approvals', label: 'Approvals', icon: ShieldCheck },
     ],
@@ -63,12 +67,20 @@ export const APP_NAV_GROUPS: NavGroup[] = [
   {
     label: 'Workspace',
     items: [
+      { href: '/app/missions', label: 'Missions', icon: Target },
       { href: '/app/integrations', label: 'Connections', icon: Plug },
       { href: '/app/settings/members', label: 'Team', icon: Users },
       { href: '/app/settings/audit', label: 'Activity', icon: History },
-      { href: '/app/notifications', label: 'Notifications', icon: Bell },
+    ],
+  },
+  {
+    label: 'Settings',
+    items: [
+      { href: '/app/settings/account', label: 'Account', icon: User },
+      { href: '/app/settings/security', label: 'Security', icon: ShieldCheck },
+      { href: '/app/settings/ai-governance', label: 'AI Governance', icon: Bot },
+      { href: '/app/settings/organization', label: 'Organization', icon: Users },
       { href: '/app/billing', label: 'Billing', icon: CreditCard },
-      { href: '/app/settings', label: 'Settings', icon: Settings },
     ],
   },
 ];
@@ -86,3 +98,12 @@ export function activeNavHref(pathname: string): string | null {
   }
   return best;
 }
+
+/** Primary mobile bottom-nav destinations (Part 33) — everything else moves
+ * behind "More". */
+export const MOBILE_PRIMARY_NAV: NavItem[] = [
+  { href: '/app/dashboard', label: 'Home', icon: LayoutDashboard },
+  { href: '/app/agent', label: 'AI Agent', icon: Bot },
+  { href: '/app/content', label: 'Content', icon: Lightbulb },
+  { href: '/app/youtube', label: 'Growth', icon: Youtube },
+];

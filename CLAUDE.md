@@ -1077,6 +1077,75 @@ password.ts` hashes with salted scrypt via `node:crypto` — no bcrypt/
   used in prior phases. See `docs/rbac.md`, `docs/enterprise-identity.md`,
   `docs/tenant-isolation.md`, `docs/ai-governance.md`,
   `docs/audit-logging.md`, `docs/PHASE-2-REPORT.md`, ADR-0052.
+- **Enterprise UI/UX, design system & AI command center** ✅ (operator's
+  "Phase 3" — foundation slice; see the honest per-item accounting below,
+  **not** a full 40-screen redesign): a design-system-first pass, since
+  every route the brief names already existed and shares `packages/ui`
+  primitives — fixing the shared layer uplifts every page rather than
+  hand-redesigning each one. **Dark mode fixed at the root cause**: the
+  Tailwind preset said `darkMode: ['class']` but nothing ever set a `.dark`
+  class — dark mode only ever worked via the OS media query, and existing
+  `dark:` utilities were dead code. A new `ThemeProvider`/`ThemeScript`
+  (`packages/ui/src/theme.tsx`) sets `data-theme` and `.dark` together, with
+  a same-origin `public/theme-init.js` anti-FOUC script (no
+  `dangerouslySetInnerHTML` — this codebase has zero of those and stays
+  that way); a Light/Dark/System `ThemeToggle` in the header, persisted
+  per-viewer. New semantic `--success`/`--warning`/`--info` tokens replace
+  hardcoded Tailwind shades in `Badge`/`Alert`. New reusable primitives
+  (Tooltip, Popover, Progress, Switch, Toast + hand-rolled `useToast` store,
+  `Command`/`CommandDialog`) — no chart or motion library added, matching
+  this codebase's "hand-roll before a dependency" convention. **App shell
+  rebuilt**: a collapsible desktop sidebar (icon rail + tooltips, persisted),
+  a mobile bottom nav (Home/AI Agent/Content/Growth/More) + full-screen
+  drawer, a global command palette (`Cmd+K`, `cmdk`-based, navigates
+  everywhere + quick actions + org switching), a skip-to-content link.
+  Sidebar regrouped to match the brief (Growth / Work / Workspace /
+  Settings); Notifications moved from a sidebar link to the header bell
+  only. **`AgentRunTimeline`** (reusable checklist component) replaces the
+  AI Agent chat's single-line status spinner, fed live by the orchestrator's
+  real SSE stage events — every label is real orchestrator output, never
+  invented. **Dashboard rebuilt on real data**: new
+  `packages/services/src/dashboard/read.ts` (`getDashboardSummary` — the
+  only new backend surface this phase, a pure read composition over four
+  already-existing tenant-scoped reads + one new scoped `agentRun.findMany`,
+  no new schema) powers growth-summary cards, AI insights, connected
+  -platforms summary, and real recent-agent-activity — replacing three
+  placeholder `—` stat cards. **New `/app/missions`** (Part 36) —
+  deliberately a _presentational aggregation_ of existing connection state
+  - automation rules, not a new `Mission` table (Part 1 forbids backend
+    changes, and a persisted-but-fake Mission entity would risk the no-fake
+    -data rule before it has real fields to hold). Notification bell rebuilt
+    on the new `Popover` primitive instead of a hand-rolled positioned div.
+    **A genuine production-build-breaking bug caught before release**:
+    `cmdk@1.1.1` exports its sub-components as flat named exports, not
+    `Command.X` properties the way older cmdk/shadcn snippets assume — every
+    page would have failed to build (`TypeError: reading 'displayName'` on
+    `undefined`); root-caused by bisecting against the pre-Phase-3 baseline
+    with `git stash -u`, fixed by importing the real named exports. **A real
+    mobile bug caught via live testing**: the mobile "More" drawer inherited
+    the desktop sidebar's persisted collapse preference, rendering as an
+    unlabeled icon-only dead end on a phone; fixed by making the mobile
+    drawer always render expanded regardless of the desktop preference.
+    Verification went beyond compilation (Part 43's own requirement): built
+    an isolated schema on the real staging Postgres (never touching the live
+    app, the same technique introduced in Phase 2), ran `next dev` locally
+    against it with the dev-only credentials provider
+    (`AUTH_DEV_LOGIN` — never usable in a production build) to sign in
+    through the real login UI, and used the Browser tool to click through the
+    dashboard, missions, command palette, sidebar collapse, dark-mode toggle,
+    a live AI Agent turn (correctly reporting it skipped SEO analysis because
+    no website was connected — not fabricating data), and the mobile layout —
+    screenshots reviewed in-session. Gates green: lint 14/14, typecheck 14/14,
+    **`packages/services` 934 tests** (+1), web build clean, 72 e2e passed /
+    32 skipped (DB-gated) + 5 new authed tests. **Honest scope statement**: the
+    brief's ~40-screen redesign is realistically several weeks of work; this
+    phase delivered the foundation (design system, dark mode, shell/nav,
+    command palette, dashboard, missions, agent timeline) with real
+    verification, and explicitly did **not** hand-redesign YouTube/TikTok/SEO/
+    Content/Automations/Reports/WordPress/Onboarding — those pages inherit
+    the token/primitive fixes automatically but keep their existing layouts;
+    full per-item accounting (done / inherited-not-redesigned / not started)
+    is in `docs/PHASE-3-REPORT.md`, ADR-0053.
 - **Still outstanding:** Postgres **RLS** (ADR-0035, re-affirmed in
   ADR-0052 — application-layer scoping + the CI tenant-scope lint +
   integration tests, now actually running, remain the accepted mitigation);
@@ -1085,9 +1154,14 @@ password.ts` hashes with salted scrypt via `node:crypto` — no bcrypt/
   paths it touched, not a repo-wide edge layer); MFA enrollment/verification
   UI (the data model — `UserMfaFactor` — exists, unused); automated
   alerting on security events (`REPEATED_LOGIN_FAILURE` etc. are recorded,
-  nothing pages on them yet); a tier-enforcement edge layer;
-  roadmap "Phase 10" leftovers (recommendation lifecycle UI, task board,
-  notifications + digests, dashboard aggregation); the general model-driven
+  nothing pages on them yet); a tier-enforcement edge layer; the bespoke
+  per-screen redesigns Phase 3 deliberately deferred (YouTube video-detail
+  AI panels, a split content-editor workspace, a visual automation builder,
+  a context panel, a content calendar, onboarding); a full WCAG 2.2 AA
+  re-audit of the Phase 3 UI changes (spot-verified only); a screenshot
+  -diff visual-regression baseline; roadmap "Phase 10" leftovers
+  (recommendation lifecycle UI, task board, notifications + digests); the
+  general model-driven
   orchestrator + `generateWithTools` + `AgentToolCall` + `pgvector` memory +
   the remaining agents + agent kill switches; SEO object-storage archiving +
   network-isolated egress pool; billing follow-ups (a worker queue for the

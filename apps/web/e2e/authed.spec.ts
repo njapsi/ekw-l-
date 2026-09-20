@@ -242,3 +242,108 @@ run('session revocation — bumping sessionVersion forces re-login', async ({ co
   // restore for other tests
   await prisma!.user.update({ where: { id: s.ownerId }, data: { sessionVersion: 0 } });
 });
+
+// --- Phase 3: UI/UX shell, command palette, missions, theme (Part 43) ---
+
+run('the missions page renders real connection state, not fake data', async ({ context, page }) => {
+  needDb();
+  const s = seeded!;
+  await signIn(context, {
+    id: s.ownerId,
+    email: `${tag}-owner@example.com`,
+    name: 'QA Owner',
+    orgs: [{ id: s.orgId, slug: s.orgSlug, name: 'QA Org', role: 'OWNER' }],
+  });
+  await page.goto('/app/missions');
+  await expect(page).toHaveURL(/\/app\/missions/);
+  await expect(page.getByRole('heading', { name: /growth missions/i })).toBeVisible();
+  // No platform is connected for this seeded org, so every mission must say
+  // so plainly rather than showing a fabricated "Active" status.
+  await expect(page.getByText(/not connected/i).first()).toBeVisible();
+});
+
+run('the command palette opens with Cmd+K and navigates', async ({ context, page }) => {
+  needDb();
+  const s = seeded!;
+  await signIn(context, {
+    id: s.ownerId,
+    email: `${tag}-owner@example.com`,
+    name: 'QA Owner',
+    orgs: [{ id: s.orgId, slug: s.orgSlug, name: 'QA Org', role: 'OWNER' }],
+  });
+  await page.goto('/app/dashboard');
+  await page.keyboard.press('ControlOrMeta+k');
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toBeVisible();
+  await page.getByPlaceholder(/search or jump to/i).fill('missions');
+  await page.getByRole('option', { name: /missions/i }).click();
+  await expect(page).toHaveURL(/\/app\/missions/);
+});
+
+run('the sidebar can collapse to an icon rail and back', async ({ context, page }) => {
+  needDb();
+  const s = seeded!;
+  await signIn(context, {
+    id: s.ownerId,
+    email: `${tag}-owner@example.com`,
+    name: 'QA Owner',
+    orgs: [{ id: s.orgId, slug: s.orgSlug, name: 'QA Org', role: 'OWNER' }],
+  });
+  await page.goto('/app/dashboard');
+  const collapseButton = page.getByRole('button', { name: /collapse sidebar/i });
+  await expect(collapseButton).toBeVisible();
+  await collapseButton.click();
+  await expect(page.getByRole('button', { name: /expand sidebar/i })).toBeVisible();
+  // Nav labels are visually hidden (icon rail) but stay in the accessibility
+  // tree, so the "Home" destination is still reachable by name. Scoped to the
+  // desktop sidebar's own <nav> — the mobile bottom nav renders a second
+  // "Home" link that is merely CSS-hidden at this viewport, not absent.
+  await expect(
+    page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Home' }),
+  ).toBeVisible();
+});
+
+run(
+  'the theme toggle switches data-theme and persists across a reload',
+  async ({ context, page }) => {
+    needDb();
+    const s = seeded!;
+    await signIn(context, {
+      id: s.ownerId,
+      email: `${tag}-owner@example.com`,
+      name: 'QA Owner',
+      orgs: [{ id: s.orgId, slug: s.orgSlug, name: 'QA Org', role: 'OWNER' }],
+    });
+    await page.goto('/app/dashboard');
+    await page.getByRole('button', { name: /^theme:/i }).click();
+    await page.getByRole('menuitem', { name: 'Dark' }).click();
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+    await page.reload();
+    // The anti-FOUC script re-applies the stored preference before hydration.
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  },
+);
+
+test.describe('mobile app shell', () => {
+  test.use({ viewport: { width: 375, height: 812 } });
+
+  run('shows a bottom nav bar with primary destinations', async ({ context, page }) => {
+    needDb();
+    const s = seeded!;
+    await signIn(context, {
+      id: s.ownerId,
+      email: `${tag}-owner@example.com`,
+      name: 'QA Owner',
+      orgs: [{ id: s.orgId, slug: s.orgSlug, name: 'QA Org', role: 'OWNER' }],
+    });
+    await page.goto('/app/dashboard');
+    const bottomNav = page.getByRole('navigation', { name: 'Primary' });
+    await expect(bottomNav).toBeVisible();
+    await expect(bottomNav.getByRole('link', { name: 'Home' })).toBeVisible();
+    await expect(bottomNav.getByRole('link', { name: 'AI Agent' })).toBeVisible();
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    );
+    expect(overflow).toBeLessThanOrEqual(1);
+  });
+});
