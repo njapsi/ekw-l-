@@ -178,3 +178,63 @@ test.describe('public share links', () => {
     expect(res.headers()['location']).toBeUndefined();
   });
 });
+
+test.describe('public API keys (/api/v1, Phase 2)', () => {
+  test('rejects a request with no key, without reading any session', async ({ request }) => {
+    const res = await request.get('/api/v1/whoami');
+    expect(res.status()).toBe(401);
+    expect(res.headers()['www-authenticate']).toBe('Bearer');
+    expect(res.headers()['cache-control']).toContain('no-store');
+    expect(await res.json()).toEqual({ error: 'Invalid or expired API key.' });
+  });
+
+  test('a malformed or forged key gets the same generic 401 (no oracle)', async ({ request }) => {
+    for (const key of ['nope', `ga_${'0'.repeat(12)}_${'A'.repeat(43)}`, 'Bearer ga_x_y']) {
+      const res = await request.get('/api/v1/connections', {
+        headers: { authorization: `Bearer ${key}` },
+      });
+      expect(res.status()).toBe(401);
+      expect(await res.json()).toEqual({ error: 'Invalid or expired API key.' });
+    }
+  });
+
+  test('a browser session cookie is not an API credential', async ({ request }) => {
+    const res = await request.get('/api/v1/whoami', {
+      headers: { cookie: 'authjs.session-token=anything; __Secure-authjs.session-token=anything' },
+    });
+    expect(res.status()).toBe(401);
+  });
+
+  test('no permissive CORS on the public API', async ({ request }) => {
+    const res = await request.get('/api/v1/whoami', {
+      headers: { origin: 'https://evil.example' },
+    });
+    expect(res.headers()['access-control-allow-origin']).toBeUndefined();
+  });
+});
+
+test.describe('identity pages require a session (Phase 2)', () => {
+  for (const path of [
+    '/app/settings/security',
+    '/app/settings/members',
+    '/app/settings/audit',
+    '/app/settings/api-keys',
+    '/app/settings/ai-governance',
+    '/app/settings/account/export',
+    '/app/settings/audit/export',
+  ]) {
+    test(`${path} redirects an anonymous visitor to sign in`, async ({ request }) => {
+      const res = await request.get(path, { maxRedirects: 0 });
+      expect([302, 303, 307, 308]).toContain(res.status());
+      expect(res.headers()['location']).toContain('/login');
+    });
+  }
+
+  test('an invitation link never accepts anything for an anonymous visitor', async ({
+    request,
+  }) => {
+    const res = await request.get(`/invite/${'A'.repeat(43)}`, { maxRedirects: 0 });
+    expect([302, 303, 307, 308]).toContain(res.status());
+    expect(res.headers()['location']).toContain('/login');
+  });
+});

@@ -1020,10 +1020,72 @@ password.ts` hashes with salted scrypt via `node:crypto` — no bcrypt/
   (+157 over the pre-Phase-1 686), tenant-scope + audit gates, web build.
   See `docs/INTEGRATIONS.md`, `docs/WORDPRESS-INTEGRATION.md`,
   `docs/PHASE-1-REPORT.md`, ADR-0050, ADR-0051.
-- **Still outstanding:** roadmap "Phase 3" (auth & tenancy hardening — **Postgres
-  RLS (ADR-0035)**, the
-  full edge/IP rate-limit layer + aggregate magic-link cap, a strict nonce-based
-  CSP, invitation email; a tier-enforcement edge layer belongs here);
+- **Enterprise identity, organizations, teams, roles & access control** ✅
+  (operator's "Phase 2"): a capability-based permission catalog
+  (`rbac/permissions.ts`, 50 permissions across 15 domains) replaces the
+  coarse `Action` enum as the source of truth, with the old names kept as an
+  exact alias table (`LEGACY_ACTION_PERMISSION`) so ~70 existing call sites
+  were untouched; a new **MANAGER** role sits between MEMBER and ADMIN with
+  strict cumulative grants, and `checkRoleChange()` is the one pure function
+  every role-change path now calls. A **server-side session registry**
+  (`UserSession`, referenced by a JWT `sid` claim) layers real per-device
+  revocation ("sign out this device" / "sign out all others") on top of the
+  existing stateless JWT sessions (ADR-0011 untouched); `AsyncLocalStorage`
+  (`auth/request-context.ts`) carries IP/device into Auth.js callbacks,
+  which receive no request object otherwise; a 15-minute recent
+  -authentication window (`authAt`) gates ownership transfer, org/account
+  deletion, and granting OWNER. New `governance/` module: a per-org,
+  Zod-validated AI policy whose schema **cannot express** automatic
+  modify/publish/delete (the safety floor is typed, not defaulted),
+  enforced in the orchestrator, agent tools, approvals, and automations.
+  New `apikeys/` module (hash-only storage, scopes capped at the creator's
+  live permissions, re-checked every request) backing new `/api/v1/*`
+  (bearer-key only, never a session cookie). Audit log gained a canonical
+  event catalog, a filtered/paginated UI, and CSV export
+  (formula-injection-safe); `SecurityEvent` (22 types, per-person,
+  cross-org) covers logins, failures, sessions, password and role changes.
+  Worker jobs (agent/report/content/seo) now call `assertJobAuthorized`
+  before running, re-deriving authorization instead of trusting the queue
+  payload. **Five real defects found and fixed in the pre-existing system**:
+  a CRITICAL account-takeover through signup (setting a password on any
+  existing passwordless account); a HIGH ADMIN→OWNER role-escalation path;
+  automations continuing to run during an org's deletion grace period;
+  loose invitation handling (GET-based accept, no re-check of the inviter's
+  current rights, no resend/revoke); and — found while re-verifying this
+  phase's own work — **every `*.integration.test.ts` file in the repo had
+  silently skipped in every environment, including CI, since it was
+  written** (the `it`-vs-`it.skip` choice was made at collection time,
+  before the `beforeAll` reachability probe it depended on had run), so no
+  prior phase's "integration tests pass in CI" claim was ever actually
+  true. Fixing that surfaced one more defect, this time in the newly
+  -running tests themselves: three integration test files passed a literal
+  placeholder string (`'u1'`, `'user-1'`) as an acting user id with no real
+  `User` row behind it, silently failing every `recordAudit` call on that
+  path (`AuditLog.actorId`'s real foreign key, correctly rejecting an
+  attributed action to a nonexistent user) — not a production bug (a real
+  `userId` is always a persisted `User`), fixed by creating a real user in
+  each fixture. New Prisma migration
+  `20260922120000_enterprise_identity` (5 new tables, additive, diffed
+  equal to Prisma's own generated SQL). New Settings area
+  (`/app/settings/*`: profile, organization, members, security, API keys,
+  AI governance, audit, danger zone) replacing one monolithic
+  `settings-tabs.tsx`. Gates green: lint 14/14, typecheck 14/14,
+  **`packages/services` 933 tests**, format/tenant-scope/audit-allowlist
+  clean, and — for the first time in this project's history — **all 11
+  integration test files actually executed against a real database and
+  passed (55/55)**, verified via the same isolated-staging-schema technique
+  used in prior phases. See `docs/rbac.md`, `docs/enterprise-identity.md`,
+  `docs/tenant-isolation.md`, `docs/ai-governance.md`,
+  `docs/audit-logging.md`, `docs/PHASE-2-REPORT.md`, ADR-0052.
+- **Still outstanding:** Postgres **RLS** (ADR-0035, re-affirmed in
+  ADR-0052 — application-layer scoping + the CI tenant-scope lint +
+  integration tests, now actually running, remain the accepted mitigation);
+  a full edge/IP rate-limit layer + aggregate magic-link cap and a strict
+  nonce-based CSP (Phase 2 added Redis-backed limits on the auth/session
+  paths it touched, not a repo-wide edge layer); MFA enrollment/verification
+  UI (the data model — `UserMfaFactor` — exists, unused); automated
+  alerting on security events (`REPEATED_LOGIN_FAILURE` etc. are recorded,
+  nothing pages on them yet); a tier-enforcement edge layer;
   roadmap "Phase 10" leftovers (recommendation lifecycle UI, task board,
   notifications + digests, dashboard aggregation); the general model-driven
   orchestrator + `generateWithTools` + `AgentToolCall` + `pgvector` memory +

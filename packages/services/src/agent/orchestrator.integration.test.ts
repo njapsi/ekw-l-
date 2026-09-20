@@ -134,19 +134,21 @@ async function seed(tag: string) {
       affectedUrlCount: 4,
     },
   });
-  return { orgId: org.id };
+  const user1 = await db.user.create({ data: { email: `${tag}-u1@example.com`, name: 'u1' } });
+  const user2 = await db.user.create({ data: { email: `${tag}-u2@example.com`, name: 'u2' } });
+  return { orgId: org.id, userId: user1.id, otherUserId: user2.id };
 }
 
 describe('Growth Agent orchestrator (integration)', () => {
   maybe()(
     'runs a full turn: plans, runs the SEO agent, persists a conversation + AgentRun, is searchable',
     async () => {
-      const { orgId } = await seed(`agent-int-${Date.now()}`);
+      const { orgId, userId } = await seed(`agent-int-${Date.now()}`);
       const res = await runGrowthAgentTurn(
         { db: prisma! },
         {
           organizationId: orgId,
-          userId: 'user-1',
+          userId,
           message: 'What are the biggest SEO problems and which pages should I fix first?',
         },
       );
@@ -156,7 +158,7 @@ describe('Growth Agent orchestrator (integration)', () => {
       expect(res.responseText.length).toBeGreaterThan(0);
 
       const convo = await getConversation(
-        { organizationId: orgId, userId: 'user-1', conversationId: res.conversationId },
+        { organizationId: orgId, userId, conversationId: res.conversationId },
         prisma!,
       );
       expect(convo.messages.map((m) => m.role)).toEqual(['USER', 'ASSISTANT']);
@@ -171,7 +173,7 @@ describe('Growth Agent orchestrator (integration)', () => {
       expect(run?.status).toBe('COMPLETED');
 
       const found = await searchConversations(
-        { organizationId: orgId, userId: 'user-1', query: 'SEO problems' },
+        { organizationId: orgId, userId, query: 'SEO problems' },
         prisma!,
       );
       expect(found.map((f) => f.id)).toContain(res.conversationId);
@@ -179,12 +181,12 @@ describe('Growth Agent orchestrator (integration)', () => {
   );
 
   maybe()('a recommendation from the turn can become a task', async () => {
-    const { orgId } = await seed(`agent-task-${Date.now()}`);
+    const { orgId, userId } = await seed(`agent-task-${Date.now()}`);
     await runGrowthAgentTurn(
       { db: prisma! },
       {
         organizationId: orgId,
-        userId: 'user-1',
+        userId,
         message: 'Which technical SEO problems should I fix first?',
       },
     );
@@ -194,7 +196,7 @@ describe('Growth Agent orchestrator (integration)', () => {
     });
     expect(rec).toBeTruthy();
     const task = await createTaskFromRecommendation(
-      { organizationId: orgId, userId: 'user-1', recommendationId: rec!.id },
+      { organizationId: orgId, userId, recommendationId: rec!.id },
       prisma!,
     );
     expect(task.title).toBe(rec!.title);
@@ -202,10 +204,10 @@ describe('Growth Agent orchestrator (integration)', () => {
   });
 
   maybe()('refuses another org’s conversation', async () => {
-    const { orgId } = await seed(`agent-iso-${Date.now()}`);
+    const { orgId, otherUserId } = await seed(`agent-iso-${Date.now()}`);
     const res = await runGrowthAgentTurn(
       { db: prisma! },
-      { organizationId: orgId, userId: 'user-1', message: 'analyze my website' },
+      { organizationId: orgId, userId: otherUserId, message: 'analyze my website' },
     );
     const other = await prisma!.organization.create({
       data: { name: `o-${Date.now()}`, slug: `o-${Date.now()}` },
@@ -215,7 +217,7 @@ describe('Growth Agent orchestrator (integration)', () => {
         { db: prisma! },
         {
           organizationId: other.id,
-          userId: 'user-2',
+          userId: otherUserId,
           conversationId: res.conversationId,
           message: 'hi',
         },

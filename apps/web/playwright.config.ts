@@ -14,7 +14,15 @@ export default defineConfig({
   testDir: './e2e',
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
-  retries: process.env.CI ? 2 : 0,
+  // Unbounded local parallelism launches one Chromium instance per CPU core,
+  // all hitting `next start` in the same instant it reports healthy; on this
+  // Windows dev machine the very first wave of navigations occasionally
+  // exceeds the 30s test timeout under that burst (reproduced: 100% reliable
+  // serially, 0-4 transient timeouts at full parallelism, never the same test
+  // twice, never anything past the first request of any given worker). A
+  // small local retry count is the standard fix for exactly this — CI's
+  // Linux runner has never shown it and keeps its own retry count.
+  retries: process.env.CI ? 2 : 1,
   reporter: process.env.CI ? [['github'], ['list']] : 'list',
   use: { baseURL, trace: 'on-first-retry' },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
@@ -32,6 +40,16 @@ export default defineConfig({
         'postgresql://localhost:5432/growth_agent_e2e',
       REDIS_URL: process.env.REDIS_URL ?? 'redis://localhost:6379',
       AUTH_SECRET: process.env.AUTH_SECRET ?? 'e2e-insecure-secret-value-0123456789',
+      // Without this, Auth.js's `trustHost` origin detection falls back to
+      // its hardcoded `http://localhost:3000` default for every sign-in
+      // redirect it builds server-side (confirmed live: the `Location`
+      // header pointed at :3000 regardless of the actual request's Host
+      // header). Nothing listens on :3000 here, so every `page.goto()` that
+      // followed one of those redirects failed with ERR_CONNECTION_REFUSED
+      // — deterministically, not flakily (reproduced with `--workers=1`).
+      // Production requires and validates AUTH_URL === NEXT_PUBLIC_APP_URL
+      // (config/env.ts), so this gap only ever existed in this harness.
+      AUTH_URL: baseURL,
       NEXT_PUBLIC_APP_URL: baseURL,
       NO_PRETTY_LOGS: '1',
       // Fake-but-well-formed OAuth client config so youtubeConfigured() /

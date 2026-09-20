@@ -6,6 +6,97 @@ reversal gets a new ADR that supersedes the old one.
 
 ---
 
+## ADR-0052 — Enterprise identity on the existing Auth.js: capability RBAC, server-side session registry, API keys, AI governance
+
+**Context.** Phase 2 asked for multi-tenant enterprise identity:
+
+- five roles with capability-based permissions;
+- invitations, session management, security settings and an audit log;
+- API keys, AI governance and worker authorization.
+
+It also said not to replace working authentication or break existing users.
+The audit of the existing system found it sound in design (Auth.js v5, JWT
+sessions, DB-verified active org, a central `authorize()`) but found five
+real defects:
+
+1. **CRITICAL: account takeover through sign-up.** `signUpAction` set a
+   password on any existing account without one (magic-link / Google users).
+   Those emails are verified, so the attacker could sign in immediately.
+2. **HIGH: role escalation.** `updateMemberRole` let an ADMIN grant OWNER
+   (including to themselves) or demote an OWNER.
+3. **MEDIUM: work continued after deletion was scheduled.** Automations kept
+   running during an organization's deletion grace period.
+4. **MEDIUM: invitations had loose ends.**
+   - Accepting happened on a GET (link scanners could consume invitations).
+   - An inviter who lost their rights could still grant roles through
+     outstanding links.
+   - There was no resend or revoke, and no email.
+5. **HIGH (test integrity): every integration test was silently skipped.**
+   All ten `*.integration.test.ts` files probed the database inside
+   `beforeAll`, but chose `it` vs `it.skip` at collection time, before
+   `beforeAll` ran. So they skipped even in CI with a real database. Earlier
+   reports' "integration tests run in CI" was not true.
+
+**Decision.**
+
+1. **Keep Auth.js, JWT sessions and the cookie-plus-DB active-org model.**
+   Add, don't replace.
+2. **A capability permission catalog** (`rbac/permissions.ts`, 50
+   permissions), a new **MANAGER** role, and strict cumulative roles. The
+   old `Action` names stay as aliases through `LEGACY_ACTION_PERMISSION`. A
+   test pins every existing role to exactly its old action set, so no
+   existing user gained or lost access. Escalation rules live in one pure
+   function (`checkRoleChange`).
+3. **A server-side session registry despite JWTs.** Each JWT carries a
+   `UserSession` id. `requireUser` rejects revoked or expired rows. "Sign out
+   all other sessions" also bumps `sessionVersion`, which kills tokens issued
+   before this change, and re-issues the current token via
+   `unstable_update`. Device and IP reach the Auth.js callback through an
+   `AsyncLocalStorage` scope set by the auth route. Only network prefixes are
+   stored.
+4. **Re-authentication by a fresh email sign-in**, not a password prompt.
+   The session-update API is client-callable, so an `authAt` claim can only
+   be set by a real sign-in. Sensitive changes need a sign-in within the
+   last 15 minutes.
+5. **API keys:** hash-only storage, scopes capped at the creator's
+   permissions, and the creator re-checked on every request. `/api/v1`
+   accepts only bearer keys and never cookies.
+6. **AI governance as a validated per-org policy** whose schema _cannot_
+   express automatic modify, publish or delete. It is enforced in approvals
+   (request and execution), agent tools, the orchestrator and automations
+   (save and run).
+7. **Worker jobs re-derive authorization at execution time**
+   (`assertJobAuthorized`).
+8. **RLS stays deferred** (ADR-0035). The four application layers are made
+   verifiable instead, with the integration suites fixed so they actually
+   run.
+9. **MFA: data model only.** The UI states it is not active, and passkeys
+   are planned first.
+
+**Alternatives considered.**
+
+- _Database sessions instead of JWT:_ rejected. It would break edge
+  middleware verification (ADR-0011) and sign every user out. The registry
+  gives revocation without that.
+- _A password prompt for re-auth:_ rejected (point 4).
+- _Enabling RLS now:_ rejected without a real test database.
+- _Rewriting every `requirePermission('legacy:action')` call site:_ rejected
+  as needless churn. The aliases are exact and tested.
+
+**Consequences.**
+
+- Migration `20260922120000_enterprise_identity`, additive only.
+- Every signed-in request does one extra indexed session lookup. Activity
+  writes are throttled to once per 5 minutes.
+- Existing sessions keep working until they naturally end or the user signs
+  out others.
+- The fixed integration suites run for the first time. Their results are in
+  `docs/PHASE-2-REPORT.md`.
+- Invitation emails need a configured transport. Otherwise the inviter gets
+  a copyable link, as before.
+
+---
+
 ## ADR-0051 — WordPress via Application Passwords, a unified sync ledger, refresh-ahead lifecycle, and an approval queue as the enforcement point
 
 **Context.** ADR-0050 gave every integration one vocabulary. Phase 1 still

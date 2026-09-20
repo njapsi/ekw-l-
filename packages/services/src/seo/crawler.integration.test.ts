@@ -91,13 +91,22 @@ async function makeOrg(tag: string): Promise<string> {
   return org.id;
 }
 
+// `AuditLog.actorId` has a real FK to `User.id`; a literal placeholder like
+// `'u1'` fails that constraint and is silently swallowed by `recordAudit`
+// (by design — see the content-pipeline test's own note on this).
+async function makeUser(tag: string): Promise<string> {
+  const user = await prisma!.user.create({ data: { email: `${tag}@example.com`, name: tag } });
+  return user.id;
+}
+
 describe('SEO crawler pipeline (integration)', () => {
   maybe()(
     'crawls a small site, records findings and scores, respecting non-indexability',
     async () => {
       const orgId = await makeOrg(`seo-crawl-${Date.now()}`);
+      const userId = await makeUser(`seo-crawl-u-${Date.now()}`);
       const site = await addWebsite(
-        { organizationId: orgId, userId: 'u1', url: 'https://vuln.example' },
+        { organizationId: orgId, userId, url: 'https://vuln.example' },
         { db: prisma!, lookup: publicDns },
       );
       // Verify ownership so the crawl is not limited to the shallow sample.
@@ -109,7 +118,7 @@ describe('SEO crawler pipeline (integration)', () => {
       const { crawlId, result } = await startCrawl(
         {
           organizationId: orgId,
-          userId: 'u1',
+          userId,
           websiteId: site.id,
           request: { maxPages: 20, maxDepth: 3 },
         },
@@ -135,10 +144,11 @@ describe('SEO crawler pipeline (integration)', () => {
 
   maybe()('refuses to crawl a website that resolves to a private address', async () => {
     const orgId = await makeOrg(`seo-ssrf-${Date.now()}`);
+    const userId = await makeUser(`seo-ssrf-u-${Date.now()}`);
     const privateDns: DnsLookupFn = async () => [{ address: '10.1.2.3', family: 4 }];
     await expect(
       addWebsite(
-        { organizationId: orgId, userId: 'u1', url: 'https://intranet.example' },
+        { organizationId: orgId, userId, url: 'https://intranet.example' },
         { db: prisma!, lookup: privateDns },
       ),
     ).rejects.toMatchObject({ code: 'validation_failed' });
@@ -149,13 +159,15 @@ describe('SEO crawler pipeline (integration)', () => {
     async () => {
       const orgA = await makeOrg(`seo-iso-a-${Date.now()}`);
       const orgB = await makeOrg(`seo-iso-b-${Date.now()}`);
+      const userA = await makeUser(`seo-iso-ua-${Date.now()}`);
+      const userB = await makeUser(`seo-iso-ub-${Date.now()}`);
       const site = await addWebsite(
-        { organizationId: orgA, userId: 'u1', url: 'https://vuln.example' },
+        { organizationId: orgA, userId: userA, url: 'https://vuln.example' },
         { db: prisma!, lookup: publicDns },
       );
       await expect(
         startCrawl(
-          { organizationId: orgB, userId: 'u2', websiteId: site.id },
+          { organizationId: orgB, userId: userB, websiteId: site.id },
           { db: prisma!, lookup: publicDns, transport: siteTransport },
         ),
       ).rejects.toMatchObject({ code: 'resource_not_found' });
@@ -164,6 +176,7 @@ describe('SEO crawler pipeline (integration)', () => {
 
   maybe()('records BLOCKED when robots.txt disallows everything', async () => {
     const orgId = await makeOrg(`seo-blocked-${Date.now()}`);
+    const userId = await makeUser(`seo-blocked-u-${Date.now()}`);
     const blockedTransport: Transport = async (req) => {
       if (req.url === 'https://blocked.example/robots.txt')
         return {
@@ -180,12 +193,12 @@ describe('SEO crawler pipeline (integration)', () => {
       };
     };
     const site = await addWebsite(
-      { organizationId: orgId, userId: 'u1', url: 'https://blocked.example' },
+      { organizationId: orgId, userId, url: 'https://blocked.example' },
       { db: prisma!, lookup: publicDns },
     );
     await prisma!.website.update({ where: { id: site.id }, data: { verified: true } });
     const { result } = await startCrawl(
-      { organizationId: orgId, userId: 'u1', websiteId: site.id },
+      { organizationId: orgId, userId, websiteId: site.id },
       { db: prisma!, lookup: publicDns, transport: blockedTransport },
     );
     expect(result.status).toBe('BLOCKED');
@@ -193,8 +206,9 @@ describe('SEO crawler pipeline (integration)', () => {
 
   maybe()('honours a cancellation requested mid-crawl', async () => {
     const orgId = await makeOrg(`seo-cancel-${Date.now()}`);
+    const userId = await makeUser(`seo-cancel-u-${Date.now()}`);
     const site = await addWebsite(
-      { organizationId: orgId, userId: 'u1', url: 'https://vuln.example' },
+      { organizationId: orgId, userId, url: 'https://vuln.example' },
       { db: prisma!, lookup: publicDns },
     );
     await prisma!.website.update({ where: { id: site.id }, data: { verified: true } });
@@ -212,7 +226,7 @@ describe('SEO crawler pipeline (integration)', () => {
     const runP = startCrawl(
       {
         organizationId: orgId,
-        userId: 'u1',
+        userId,
         websiteId: site.id,
         request: { maxPages: 20, crawlDelayMs: 50 },
       },
@@ -224,8 +238,7 @@ describe('SEO crawler pipeline (integration)', () => {
       where: { organizationId: orgId },
       orderBy: { createdAt: 'desc' },
     });
-    if (running)
-      await requestCrawlCancel({ organizationId: orgId, crawlId: running.id, userId: 'u1' });
+    if (running) await requestCrawlCancel({ organizationId: orgId, crawlId: running.id, userId });
     const { result } = await runP;
     expect(['CANCELLED', 'COMPLETED']).toContain(result.status);
   });

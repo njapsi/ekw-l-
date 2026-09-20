@@ -45,15 +45,27 @@ async function makeOrg(tag: string) {
   return org.id;
 }
 
+// `AuditLog.actorId` has a real FK to `User.id` — a literal placeholder like
+// `'u1'` fails that constraint, and `recordAudit` swallows the error rather
+// than throwing into the caller (by design: an audit-write failure must
+// never break the operation being audited). That silently dropped every
+// content-pipeline audit row here except `content.project.analyzed` (the one
+// call site that omits `actorId`) until this test created a real user.
+async function makeUser(tag: string) {
+  const user = await prisma!.user.create({ data: { email: `${tag}@example.com`, name: tag } });
+  return user.id;
+}
+
 describe('content repurposing pipeline (integration)', () => {
   maybe()(
     'source → analyze → generate → edit → approve → schedule → mark published, with versions + audit',
     async () => {
       const orgId = await makeOrg(`content-${Date.now()}`);
+      const userId = await makeUser(`content-user-${Date.now()}`);
       const project = await createRepurposeProject(
         {
           organizationId: orgId,
-          userId: 'u1',
+          userId,
           source: {
             kind: 'manual',
             title: 'A year of consistent uploads',
@@ -77,7 +89,7 @@ describe('content repurposing pipeline (integration)', () => {
         { db: prisma! },
         {
           organizationId: orgId,
-          userId: 'u1',
+          userId,
           projectId: project.id,
           types: ['YT_TITLE_ALTERNATIVES', 'YT_DESCRIPTION', 'SHORTS_IDEA', 'FAQ'],
         },
@@ -91,7 +103,7 @@ describe('content repurposing pipeline (integration)', () => {
       await editAsset(
         {
           organizationId: orgId,
-          userId: 'u1',
+          userId,
           assetId: asset.id,
           body: 'My hand-edited description.',
         },
@@ -101,14 +113,14 @@ describe('content repurposing pipeline (integration)', () => {
       expect(vs.versions.map((v) => v.versionNumber).sort()).toEqual([1, 2]);
       expect(vs.versions.find((v) => v.isCurrent)!.body).toBe('My hand-edited description.');
 
-      await approveAsset({ organizationId: orgId, userId: 'u1', assetId: asset.id }, prisma!);
+      await approveAsset({ organizationId: orgId, userId, assetId: asset.id }, prisma!);
       const when = new Date(Date.now() + 86_400_000);
       await scheduleAsset(
-        { organizationId: orgId, userId: 'u1', assetId: asset.id, scheduledFor: when },
+        { organizationId: orgId, userId, assetId: asset.id, scheduledFor: when },
         prisma!,
       );
       await markAssetPublished(
-        { organizationId: orgId, userId: 'u1', assetId: asset.id, target: 'manual' },
+        { organizationId: orgId, userId, assetId: asset.id, target: 'manual' },
         prisma!,
       );
 
@@ -118,7 +130,7 @@ describe('content repurposing pipeline (integration)', () => {
 
       const v1Body = vs.versions.find((v) => v.versionNumber === 1)!.body;
       await revertAsset(
-        { organizationId: orgId, userId: 'u1', assetId: asset.id, versionNumber: 1 },
+        { organizationId: orgId, userId, assetId: asset.id, versionNumber: 1 },
         prisma!,
       );
       const reverted = await prisma!.contentAsset.findUnique({
@@ -150,10 +162,11 @@ describe('content repurposing pipeline (integration)', () => {
   maybe()('refuses a project / asset from another org', async () => {
     const orgA = await makeOrg(`content-a-${Date.now()}`);
     const orgB = await makeOrg(`content-b-${Date.now()}`);
+    const userId = await makeUser(`content-user-${Date.now()}`);
     const project = await createRepurposeProject(
       {
         organizationId: orgA,
-        userId: 'u1',
+        userId,
         source: { kind: 'manual', body: 'A reasonably long body of source content to analyze.' },
       },
       prisma!,

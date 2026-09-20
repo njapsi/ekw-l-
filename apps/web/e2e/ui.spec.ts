@@ -7,12 +7,24 @@ import { expect, test } from '@playwright/test';
  */
 
 test.describe('auth form', () => {
-  test('login shows the magic-link form and the signup link', async ({ page }) => {
+  // The password tab is the default (ADR-0049): "Welcome back", an email +
+  // password form, a "Magic Link" tab alongside it, and a link to sign up.
+  test('login shows the password form, the magic-link tab and the signup link', async ({
+    page,
+  }) => {
     await page.goto('/login');
-    await expect(page.getByRole('heading', { name: /log in/i })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /welcome back/i })).toBeVisible();
     await expect(page.getByLabel('Email')).toBeVisible();
-    await expect(page.getByRole('button', { name: /send sign-in link/i })).toBeVisible();
+    await expect(page.getByRole('button', { name: /^log in$/i })).toBeVisible();
+    await expect(page.getByRole('tab', { name: /magic link/i })).toBeVisible();
     await expect(page.getByRole('link', { name: /create an account/i })).toBeVisible();
+  });
+
+  test('the magic-link tab shows its own form', async ({ page }) => {
+    await page.goto('/login');
+    await page.getByRole('tab', { name: /magic link/i }).click();
+    await expect(page.getByLabel('Email')).toBeVisible();
+    await expect(page.getByRole('button', { name: /send magic link/i })).toBeVisible();
   });
 
   test('rejects an email with no TLD client-side (no magic-link request fires)', async ({
@@ -23,14 +35,15 @@ test.describe('auth form', () => {
       if (/\/api\/auth\/(signin|callback)\/nodemailer/.test(r.url())) sendAttempted = true;
     });
     await page.goto('/login');
+    await page.getByRole('tab', { name: /magic link/i }).click();
     // `a@b` passes the browser's native `type=email` check but fails the form's
     // own `EMAIL_RE` (which requires a dot), so the JS handler returns early and
     // shows its message without dispatching the magic-link send.
     await page.getByLabel('Email').fill('a@b');
-    await page.getByRole('button', { name: /send sign-in link/i }).click();
-    await expect(page.getByText(/valid email address/i)).toBeVisible();
+    await page.getByRole('button', { name: /send magic link/i }).click();
+    await expect(page.getByText(/could not send the sign-in link/i)).toBeVisible();
     // Still on the input form — not the "check your email" state.
-    await expect(page.getByRole('button', { name: /send sign-in link/i })).toBeVisible();
+    await expect(page.getByRole('button', { name: /send magic link/i })).toBeVisible();
     expect(sendAttempted).toBe(false);
   });
 
@@ -38,8 +51,9 @@ test.describe('auth form', () => {
     page,
   }) => {
     await page.goto('/login');
+    await page.getByRole('tab', { name: /magic link/i }).click();
     await page.getByLabel('Email').fill('qa-user@example.com');
-    await page.getByRole('button', { name: /send sign-in link/i }).click();
+    await page.getByRole('button', { name: /send magic link/i }).click();
     // Without a database/mail transport the send fails; the form must show a
     // friendly message OR the "check your email" state — never an unhandled
     // error page.
