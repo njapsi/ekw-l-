@@ -32,6 +32,7 @@ import {
   type IntegrationToolName,
   runIntegrationTool,
 } from './integration-tools.js';
+import { YOUTUBE_TOOLS, type YouTubeToolName } from './youtube-tools.js';
 
 /** LOW → read-only or purely observational. MEDIUM → creates a pending,
  * human-approved request but commits nothing itself. HIGH/CRITICAL describe
@@ -118,8 +119,96 @@ const RESEARCH_METADATA: Record<
   },
 };
 
-/** The static catalogue — native + research tools, identical for every
- * organization. Never exposes a handler, only the description of what
+/** Category/risk metadata for the YouTube Growth Agent tools (Phase 6, Part
+ * 62). Every one is READ or ANALYZE/GENERATE against already-synced,
+ * already-connected data — none writes to YouTube (`youtube-tools.ts`'s own
+ * header explains why no publish tool exists), so risk stays LOW throughout,
+ * matching the native read tools above. */
+const YOUTUBE_METADATA: Record<YouTubeToolName, Omit<AgentToolMetadata, 'name' | 'description'>> = {
+  'youtube.channel.get': {
+    category: 'READ',
+    integration: 'YOUTUBE',
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTEGRATION',
+    organizationScoped: true,
+  },
+  'youtube.channel.analytics': {
+    category: 'READ',
+    integration: 'YOUTUBE',
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTEGRATION',
+    organizationScoped: true,
+  },
+  'youtube.video.list': {
+    category: 'READ',
+    integration: 'YOUTUBE',
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTEGRATION',
+    organizationScoped: true,
+  },
+  'youtube.content.performance': {
+    category: 'ANALYSIS',
+    integration: 'YOUTUBE',
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTEGRATION',
+    organizationScoped: true,
+  },
+  'youtube.content.compare': {
+    category: 'ANALYSIS',
+    integration: 'YOUTUBE',
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTEGRATION',
+    organizationScoped: true,
+  },
+  'youtube.content.patterns': {
+    category: 'ANALYSIS',
+    integration: 'YOUTUBE',
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTEGRATION',
+    organizationScoped: true,
+  },
+  'youtube.content.opportunities': {
+    category: 'ANALYSIS',
+    integration: 'YOUTUBE',
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTEGRATION',
+    organizationScoped: true,
+  },
+  'youtube.content.calendar.generate': {
+    category: 'GENERATION',
+    integration: 'YOUTUBE',
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTEGRATION',
+    organizationScoped: true,
+  },
+  'youtube.experiment.create': {
+    category: 'GENERATION',
+    integration: 'YOUTUBE',
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTEGRATION',
+    organizationScoped: true,
+  },
+  'youtube.report.generate': {
+    category: 'GENERATION',
+    integration: 'YOUTUBE',
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTEGRATION',
+    organizationScoped: true,
+  },
+};
+
+/** The static catalogue — native + research + YouTube tools, identical for
+ * every organization. Never exposes a handler, only the description of what
  * exists (Part 57). Use `listOrgToolMetadata` for the per-org catalogue
  * that also includes enabled MCP tools. */
 export function listToolMetadata(): AgentToolMetadata[] {
@@ -133,7 +222,12 @@ export function listToolMetadata(): AgentToolMetadata[] {
     description: tool.description,
     ...RESEARCH_METADATA[tool.name],
   }));
-  return [...native, ...research];
+  const youtube = Object.values(YOUTUBE_TOOLS).map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    ...YOUTUBE_METADATA[tool.name],
+  }));
+  return [...native, ...research, ...youtube];
 }
 
 /**

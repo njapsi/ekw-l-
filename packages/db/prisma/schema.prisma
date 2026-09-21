@@ -171,6 +171,9 @@ model Organization {
   youTubeVideos             YouTubeVideo[]
   youTubeMetrics            YouTubeMetric[]
   youTubeSyncRuns           YouTubeSyncRun[]
+  youTubeOpportunities      YouTubeOpportunity[]
+  youTubeExperiments        YouTubeExperiment[]
+  youTubeCalendarEntries    YouTubeCalendarEntry[]
   tikTokAccounts            TikTokAccount[]
   tikTokVideos              TikTokVideo[]
   tikTokMetrics             TikTokMetric[]
@@ -409,10 +412,13 @@ model YouTubeChannel {
   lastAnalyticsSyncAt   DateTime?
   lastVideoPublishedAt  DateTime?
 
-  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  connection   OAuthConnection  @relation(fields: [oauthConnectionId], references: [id], onDelete: Cascade)
-  videos       YouTubeVideo[]
-  syncRuns     YouTubeSyncRun[]
+  organization    Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  connection      OAuthConnection        @relation(fields: [oauthConnectionId], references: [id], onDelete: Cascade)
+  videos          YouTubeVideo[]
+  syncRuns        YouTubeSyncRun[]
+  opportunities   YouTubeOpportunity[]
+  experiments     YouTubeExperiment[]
+  calendarEntries YouTubeCalendarEntry[]
 
   @@unique([organizationId, channelId])
   @@index([oauthConnectionId])
@@ -517,6 +523,157 @@ model YouTubeSyncRun {
 
   @@index([youTubeChannelId, kind, startedAt])
   @@map("youtube_sync_runs")
+}
+
+// --- YouTube Growth Agent (Phase 6): opportunities, experiments, calendar --
+
+/// Mirrors `MonetizationOpportunity`'s shape (Phase 9 precedent) rather than
+/// the generic `Recommendation` model — an opportunity carries a documented,
+/// factor-based `priorityScore` and a distinct action lifecycle a plain
+/// recommendation doesn't need.
+enum YouTubeOpportunityType {
+  CONTENT_EXPANSION
+  CONTENT_GAP
+  HIGH_PERFORMER_FOLLOWUP
+  UNDEREXPLOITED_TOPIC
+  FORMAT_OPPORTUNITY
+  AUDIENCE_OPPORTUNITY
+  TRAFFIC_SOURCE_OPPORTUNITY
+  SERIES_OPPORTUNITY
+  SHORTS_OPPORTUNITY
+  LONG_FORM_OPPORTUNITY
+}
+
+/// One identified content opportunity for a channel. `priorityScore` is a
+/// documented composite (`youtube/opportunities.ts`), never a "virality"
+/// prediction — the brief's own Part 20 explicitly forbids that framing.
+model YouTubeOpportunity {
+  id               String                 @id @default(cuid())
+  organizationId   String
+  youTubeChannelId String
+  type             YouTubeOpportunityType
+  title            String
+  description      String                 @db.Text
+  status           OpportunityStatus      @default(SUGGESTED)
+  /// [{ statement, kind: fact|calculated_metric|assumption }] — Part 12's
+  /// evidence layer, never skipped.
+  evidence         Json                   @default("[]")
+  /// Named, documented factors in [0,1] — see youtube/opportunities.ts.
+  evidenceStrength     Float
+  historicalPerformance Float
+  contentGap           Float
+  executionFeasibility Float
+  priorityScore    Float
+  confidence       String // HIGH | MEDIUM | LOW — Part 13, never a bare number
+  recommendedActions String[]
+  relatedVideoIds  String[]
+  sourceAgentRunId String?
+  dismissedReason  String?
+  createdAt        DateTime               @default(now())
+  updatedAt        DateTime               @updatedAt
+
+  organization Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  channel      YouTubeChannel @relation(fields: [youTubeChannelId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, status, priorityScore])
+  @@index([youTubeChannelId])
+  @@map("youtube_opportunities")
+}
+
+enum YouTubeExperimentStatus {
+  PLANNED
+  RUNNING
+  COMPLETED
+  CANCELLED
+}
+
+enum YouTubeExperimentDirection {
+  INCREASE
+  DECREASE
+}
+
+enum YouTubeExperimentConclusion {
+  SUPPORTED
+  NOT_SUPPORTED
+  INCONCLUSIVE
+}
+
+/// Part 41-42: a controlled test, never a forced "winner". `conclusion` is
+/// only ever set by `youtube/experiments.ts`'s deterministic comparison —
+/// never asserted by a model.
+model YouTubeExperiment {
+  id               String                       @id @default(cuid())
+  organizationId   String
+  youTubeChannelId String
+  hypothesis       String                       @db.Text
+  variable         String
+  baseline         Json
+  experimentNote   String                       @db.Text
+  successMetric    String
+  expectedDirection YouTubeExperimentDirection
+  status           YouTubeExperimentStatus      @default(PLANNED)
+  startDate        DateTime                     @db.Date
+  endDate          DateTime?                    @db.Date
+  result           Json?
+  conclusion       YouTubeExperimentConclusion?
+  confidence       String?
+  createdById      String?
+  createdAt        DateTime                     @default(now())
+  updatedAt        DateTime                     @updatedAt
+
+  organization Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  channel      YouTubeChannel @relation(fields: [youTubeChannelId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, status])
+  @@index([youTubeChannelId])
+  @@map("youtube_experiments")
+}
+
+/// Part 38's pipeline states, distinct from `ContentAssetVersion.status`
+/// (DRAFT/…) because a calendar entry tracks a broader lifecycle than one
+/// generated asset (idea → brief → script → schedule → publish tracking).
+enum YouTubeCalendarStatus {
+  IDEA
+  PLANNED
+  BRIEFED
+  SCRIPTED
+  DRAFT
+  READY
+  APPROVAL_REQUIRED
+  SCHEDULED
+  PUBLISHED
+  ANALYZING
+  COMPLETED
+  CANCELLED
+}
+
+/// One planned piece of content. `contentIdeaId` links back to the shared
+/// `ContentIdea` row when the entry came from the idea/opportunity pipeline;
+/// null for a manually added calendar slot. Never implies a real YouTube
+/// schedule/publish happened — see `docs/YOUTUBE-GROWTH-AGENT.md`.
+model YouTubeCalendarEntry {
+  id               String                @id @default(cuid())
+  organizationId   String
+  youTubeChannelId String
+  contentIdeaId    String?
+  scheduledDate    DateTime              @db.Date
+  title            String
+  format           String // "short" | "long_form" | "live" | "playlist"
+  status           YouTubeCalendarStatus @default(IDEA)
+  rationale        String                @db.Text
+  sourceOpportunityId String?
+  notes            String?               @db.Text
+  createdById      String?
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+
+  organization Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  channel      YouTubeChannel @relation(fields: [youTubeChannelId], references: [id], onDelete: Cascade)
+  contentIdea  ContentIdea?   @relation(fields: [contentIdeaId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, scheduledDate])
+  @@index([youTubeChannelId])
+  @@map("youtube_calendar_entries")
 }
 
 // --- Agent runs, recommendations, content ideas (shared; YouTube uses them) --
@@ -718,8 +875,9 @@ model ContentIdea {
   createdByAgentRunId String?
   createdAt           DateTime          @default(now())
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  createdByRun AgentRun?    @relation(fields: [createdByAgentRunId], references: [id], onDelete: SetNull)
+  organization    Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdByRun    AgentRun?              @relation(fields: [createdByAgentRunId], references: [id], onDelete: SetNull)
+  calendarEntries YouTubeCalendarEntry[]
 
   @@index([organizationId, platform, status])
   @@map("content_ideas")

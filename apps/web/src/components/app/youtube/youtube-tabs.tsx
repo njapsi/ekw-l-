@@ -10,6 +10,8 @@ const TABS = [
   ['/app/youtube/videos', 'Videos'],
   ['/app/youtube/growth', 'Growth'],
   ['/app/youtube/opportunities', 'Content opportunities'],
+  ['/app/youtube/calendar', 'Calendar'],
+  ['/app/youtube/experiments', 'Experiments'],
   ['/app/youtube/monetization', 'Monetization'],
   ['/app/youtube/recommendations', 'Recommendations'],
 ] as const;

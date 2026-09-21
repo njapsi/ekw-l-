@@ -19,6 +19,7 @@ import { assessMonetization } from '../youtube/monetization.js';
 import type { OrgContext } from './context.js';
 import { connectionFacts } from './integration-tools.js';
 import type { CapabilityId, EvidenceItem } from './schemas.js';
+import { executeAgentTool } from './tool-executor.js';
 
 const log = createLogger('agent.capabilities');
 
@@ -33,6 +34,10 @@ export interface CapabilityContext {
   message: string;
   orgContext: OrgContext;
   goals: string[];
+  /** The current turn's `AgentRun` id, so a capability that dispatches through
+   * `executeAgentTool` (Phase 6, Part 62) attaches its tool events to this
+   * turn's durable timeline instead of running standalone. */
+  agentRunId?: string;
 }
 
 export interface CapabilityRecommendation {
@@ -377,6 +382,131 @@ const youtubeMonetizationCapability: Capability = {
   },
 };
 
+// --- youtube-growth ------------------------------------------------
+
+/**
+ * The one capability that dispatches through Phase 4/5's Tool
+ * Registry/Policy Engine/Tool Executor (`executeAgentTool`) rather than
+ * calling a `youtube/*` function directly — Phase 6, Part 62's explicit
+ * mandate to route new YouTube functionality through the existing
+ * architecture instead of bypassing it. `youtube-analyst` and
+ * `youtube-monetization` above are untouched (Part 122: backward
+ * compatibility) — this is new surface area, not a replacement.
+ */
+const youtubeGrowthCapability: Capability = {
+  id: 'youtube-growth',
+  title: 'YouTube content opportunities & patterns',
+  description:
+    "Benchmarks recent videos against the channel's own history, detects content patterns, and surfaces evidence-backed content opportunities with a documented priority score.",
+  keywords: [
+    'opportunity',
+    'opportunities',
+    'content idea',
+    'content pattern',
+    'content calendar',
+    'benchmark',
+    'outperform',
+    'underperform',
+    'compare videos',
+    'what should i post',
+    'experiment',
+  ],
+  async run(ctx) {
+    if (!ctx.orgContext.youtube.connected) {
+      return needsPrereq(
+        'youtube-growth',
+        'YouTube content opportunities',
+        'Connect a YouTube channel from /app/integrations/youtube and run a sync.',
+      );
+    }
+    const toolCtx = {
+      organizationId: ctx.organizationId,
+      userId: ctx.userId,
+      db: ctx.db,
+      agentRunId: ctx.agentRunId,
+    };
+    const [performanceEnv, patternsEnv, opportunitiesEnv] = await Promise.all([
+      executeAgentTool(toolCtx, 'youtube.content.performance', { limit: 50 }),
+      executeAgentTool(toolCtx, 'youtube.content.patterns', { limit: 50 }),
+      executeAgentTool(toolCtx, 'youtube.content.opportunities', { regenerate: true }),
+    ]);
+
+    if (
+      performanceEnv.status !== 'SUCCESS' &&
+      patternsEnv.status !== 'SUCCESS' &&
+      opportunitiesEnv.status !== 'SUCCESS'
+    ) {
+      const reason =
+        opportunitiesEnv.error?.message ??
+        performanceEnv.error?.message ??
+        'No YouTube data is available yet to analyze.';
+      return needsPrereq('youtube-growth', 'YouTube content opportunities', reason);
+    }
+
+    const benchmarks =
+      performanceEnv.status === 'SUCCESS'
+        ? ((performanceEnv.data as { benchmarks: youtube.VideoBenchmark[] }).benchmarks ?? [])
+        : [];
+    const patterns =
+      patternsEnv.status === 'SUCCESS'
+        ? ((patternsEnv.data as { patterns: youtube.ContentPattern[] }).patterns ?? [])
+        : [];
+    const opportunities =
+      opportunitiesEnv.status === 'SUCCESS'
+        ? ((opportunitiesEnv.data as { opportunities: Array<Record<string, unknown>> })
+            .opportunities ?? [])
+        : [];
+
+    const outperforming = benchmarks.filter((b) => b.classification === 'OUTPERFORMING').length;
+    const underperforming = benchmarks.filter((b) => b.classification === 'UNDERPERFORMING').length;
+
+    const evidence = [
+      metric(
+        `${benchmarks.length} recent video(s) benchmarked against this channel's own comparable-format history: ${outperforming} outperforming, ${underperforming} underperforming.`,
+      ),
+      ...patterns.slice(0, 4).map((p) => rec(`${p.label}: ${p.observation}`)),
+    ];
+
+    const recs: CapabilityRecommendation[] = opportunities.slice(0, 6).map((o) => ({
+      title: typeof o.title === 'string' ? o.title : 'Content opportunity',
+      problem: typeof o.description === 'string' ? o.description : '',
+      whyItMatters: Array.isArray(o.evidence)
+        ? (o.evidence as Array<{ statement?: string }>)
+            .map((e) => e.statement)
+            .filter(Boolean)
+            .join(' ')
+        : '',
+      howToFix: Array.isArray(o.recommendedActions)
+        ? (o.recommendedActions as string[]).join(' ')
+        : 'Review this opportunity in /app/youtube/opportunities.',
+      expectedBenefit:
+        "A content opportunity backed by this channel's own history — not a virality prediction or a guarantee.",
+      priority:
+        Number(o.priorityScore ?? 0) >= 0.7
+          ? 'high'
+          : Number(o.priorityScore ?? 0) >= 0.4
+            ? 'medium'
+            : 'low',
+      difficulty: 'medium',
+      confidence: o.confidence === 'HIGH' ? 0.85 : o.confidence === 'MEDIUM' ? 0.6 : 0.35,
+      domain: 'YOUTUBE',
+      affectedUrls: [],
+      affectedRefs: Array.isArray(o.relatedVideoIds) ? (o.relatedVideoIds as string[]) : [],
+    }));
+
+    return {
+      capabilityId: 'youtube-growth',
+      status: 'ok',
+      summary:
+        opportunities.length > 0
+          ? `${opportunities.length} content opportunit${opportunities.length === 1 ? 'y' : 'ies'} identified from this channel's own performance history, ranked by priority score.`
+          : 'No content opportunities identified yet from the currently synced videos.',
+      evidence,
+      recommendations: recs,
+    };
+  },
+};
+
 // --- tiktok-analyst --------------------------------------------
 
 const tiktokAnalystCapability: Capability = {
@@ -700,6 +830,7 @@ export const CAPABILITIES: Capability[] = [
   orgContextCapability,
   youtubeAnalystCapability,
   youtubeMonetizationCapability,
+  youtubeGrowthCapability,
   tiktokAnalystCapability,
   seoAgentCapability,
   contentRepurposeCapability,

@@ -1289,6 +1289,57 @@ password.ts` hashes with salted scrypt via `node:crypto` — no bcrypt/
   as-is rather than risk a destructive fix. See `docs/TOOL-PLATFORM.md`,
   `docs/MCP.md`, `docs/PHASE-5-REPORT.md`, `docs/AGENTS.md` (updated),
   `docs/AI-ARCHITECTURE.md` (updated), ADR-0055.
+- **YouTube Growth Agent — content strategy layer** ✅ (operator's
+  "Phase 6"): extends the original YouTube integration (unchanged) with a
+  content-strategy layer, routed through the Phase 4/5 Tool Registry and
+  Policy Engine rather than a new path. Six new pure-logic modules
+  (`packages/services/src/youtube/{benchmark,patterns,opportunities,
+experiments,calendar,monitoring}.ts`): per-video benchmarking against the
+  channel's own format-bucket median (documented ≥1.5×/≤0.5× thresholds,
+  never a global average); topic/format pattern detection; a five-factor
+  weighted **PRIORITY SCORE** (never a "viral score" — `evidenceStrength·
+0.35 + historicalPerformance·0.25 + contentGap·0.25 +
+executionFeasibility·0.15`, `audienceRelevance` deliberately omitted for
+  lack of real data); content-calendar generation (cycles opportunities,
+  never fabricates a topic for an empty slot); experiment evaluation
+  (SUPPORTED/NOT_SUPPORTED/INCONCLUSIVE from a documented 15%-change
+  threshold, never a model's opinion); anomaly detection (trailing-14-day
+  mean/stdDev baseline, 2.5σ/4σ thresholds). `getYouTubeCapabilityMatrix`
+  reports all 14 named capabilities explicitly, including the seven
+  write-shaped ones this deployment can never satisfy (no write scope is
+  ever requested) and two analytics breakdowns not synced (audience/
+  traffic — deferred rather than built against an unverifiable API
+  combination). New Prisma migration `20260925120000_youtube_growth_agent`
+  (`YouTubeOpportunity`, `YouTubeExperiment`, `YouTubeCalendarEntry`,
+  additive). **`agent/youtube-tools.ts`** — ten new tools as a closed
+  allowlist dispatched through the existing `executeAgentTool` (Phase 5),
+  each capability-gated via the same `assertCapabilityUsable` WordPress/
+  Google tools already use; `tool-executor.ts` gained one new `'youtube'`
+  kind, reusing its existing rate-limit/`TOOL_CALLS` metering/
+  `AgentRunEvent` timeline unchanged. A new orchestrator capability,
+  `youtube-growth` (`agent/capabilities.ts`), is the one capability in the
+  Growth Agent that calls `executeAgentTool` instead of a `youtube/*`
+  function directly — closing the gap this phase's audit found; the
+  pre-existing `youtube-analyst`/`youtube-monetization` capabilities are
+  untouched. `reports/facts.ts`'s `gatherYouTube` gained opportunity/
+  experiment facts (additive); `automation/dispatch.ts`'s
+  `runYouTubeAnalysis` now also runs anomaly detection and notifies via
+  the existing notifications module. UI: `/app/youtube/opportunities`
+  gained a real priority-scored opportunities section (regenerate/promote/
+  dismiss); `/app/youtube/performance` gained a per-video benchmark
+  section; new `/app/youtube/calendar` and `/app/youtube/experiments`
+  pages. Deliberately not built: any write/publish tool (no write scope
+  exists to gate), five YouTube-specific content-generation tools (the
+  Content Repurposing engine already covers this), separate weekly/monthly
+  report tools (the reporting engine's `YOUTUBE` type has no such
+  distinction). Gates green: lint 14/14, typecheck 14/14, **`packages/services`
+  1100 tests** (+59), web build, tenant-scope clean. **Verification limit,
+  disclosed**: no live YouTube OAuth credentials exist in this sandbox, so
+  none of the new read paths (nor the pre-existing sync path they depend
+  on) were verified against a real account — every new module operates
+  purely on already-synced database rows and was unit-tested against
+  hand-built fixtures instead. See `docs/YOUTUBE-GROWTH-AGENT.md`,
+  `docs/PHASE-6-REPORT.md`, ADR-0056.
 - **Still outstanding:** Postgres **RLS** (ADR-0035, re-affirmed in
   ADR-0052 — application-layer scoping + the CI tenant-scope lint +
   integration tests, now actually running, remain the accepted mitigation);
@@ -1304,12 +1355,16 @@ password.ts` hashes with salted scrypt via `node:crypto` — no bcrypt/
   re-audit of the Phase 3 UI changes (spot-verified only); a screenshot
   -diff visual-regression baseline; roadmap "Phase 10" leftovers
   (recommendation lifecycle UI, task board, notifications + digests);
-  wiring the now-real `packages/ai` tool-calling support, the Phase 5
-  Policy Engine / Capability Discovery / Tool Executor, and MCP into an
+  wiring the now-real `packages/ai` tool-calling support and MCP into an
   actual live `growth-agent` capability (the infrastructure and tests
-  exist for all of it — see ADR-0054/ADR-0055, `docs/AGENT-RUNTIME.md` §6,
-  `docs/TOOL-PLATFORM.md`, `docs/MCP.md` — nothing in the live orchestrator
-  path calls any of it yet); running `mcp/tenant-isolation.integration.test.ts`
+  exist for both — see ADR-0054/ADR-0055, `docs/AGENT-RUNTIME.md` §6,
+  `docs/MCP.md` — nothing in the live orchestrator path calls either yet;
+  **partially closed by Phase 6/ADR-0056** — the Tool Executor and its
+  Policy Engine are now the live dispatch path for one capability,
+  `youtube-growth`, calling `youtube.*` tools directly rather than via a
+  model-driven tool-calling loop; the remaining domains (TikTok, SEO) and
+  true agent-selected tool-calling are still unwired); running
+  `mcp/tenant-isolation.integration.test.ts`
   against a real database (written, typechecks, self-skips correctly, but
   unverified against Postgres — see the Phase 5 bullet above); connecting
   a real external MCP server (only a hand-rolled protocol-correct fixture

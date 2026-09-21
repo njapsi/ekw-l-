@@ -102,6 +102,151 @@ export async function syncYouTubeAction(
   }
 }
 
+export async function regenerateOpportunitiesAction(): Promise<ActionResult> {
+  try {
+    const { org } = await requirePermission('agent:run');
+    const channel = await youtube.getPrimaryChannel(org.id);
+    if (!channel) return { ok: false, error: 'Sync a channel first.' };
+    const videos = await youtube.listVideosPage(org.id, { limit: 50, sort: 'recent' });
+    const rows = await Promise.all(
+      videos.videos.map(async (v) => ({
+        videoId: v.videoId,
+        title: v.title,
+        publishedAt: v.publishedAt,
+        durationSeconds: v.durationSeconds,
+        viewCount: v.viewCount ? BigInt(v.viewCount) : null,
+        likeCount: v.likeCount ? BigInt(v.likeCount) : null,
+        commentCount: v.commentCount ? BigInt(v.commentCount) : null,
+        tags: [] as string[],
+      })),
+    );
+    const drafts = youtube.buildOpportunityDrafts(rows);
+    const written = await youtube.upsertOpportunities({
+      organizationId: org.id,
+      youTubeChannelId: channel.id,
+      drafts,
+    });
+    revalidatePath('/app/youtube/opportunities');
+    return {
+      ok: true,
+      message:
+        written > 0
+          ? `${written} content opportunit${written === 1 ? 'y' : 'ies'} identified.`
+          : 'No new content opportunities from the currently synced videos.',
+    };
+  } catch (e) {
+    return toError(e);
+  }
+}
+
+export async function promoteOpportunityAction(opportunityId: string): Promise<ActionResult> {
+  try {
+    const { org, user } = await requirePermission('agent:run');
+    await youtube.promoteYouTubeOpportunityToTask({
+      organizationId: org.id,
+      userId: user.id,
+      opportunityId,
+    });
+    revalidatePath('/app/youtube/opportunities');
+    revalidatePath('/app/tasks');
+    return { ok: true, message: 'Added to Tasks.' };
+  } catch (e) {
+    return toError(e);
+  }
+}
+
+export async function dismissOpportunityAction(opportunityId: string): Promise<ActionResult> {
+  try {
+    const { org, user } = await requirePermission('agent:run');
+    await youtube.updateYouTubeOpportunityStatus({
+      organizationId: org.id,
+      userId: user.id,
+      opportunityId,
+      status: 'DISMISSED',
+    });
+    revalidatePath('/app/youtube/opportunities');
+    return { ok: true, message: 'Dismissed.' };
+  } catch (e) {
+    return toError(e);
+  }
+}
+
+export async function generateCalendarAction(
+  cadencePerWeek: number,
+  weeks: number,
+): Promise<ActionResult> {
+  try {
+    const { org, user } = await requirePermission('agent:run');
+    const channel = await youtube.getPrimaryChannel(org.id);
+    if (!channel) return { ok: false, error: 'Sync a channel first.' };
+    const opportunities = await youtube.listYouTubeOpportunities(org.id, { status: 'SUGGESTED' });
+    const drafts = youtube.generateCalendarDrafts({
+      opportunities: opportunities.map((o) => ({
+        type: o.type,
+        title: o.title,
+        description: o.description,
+        evidence: o.evidence as never,
+        factors: {
+          evidenceStrength: o.evidenceStrength,
+          historicalPerformance: o.historicalPerformance,
+          contentGap: o.contentGap,
+          executionFeasibility: o.executionFeasibility,
+        },
+        priorityScore: o.priorityScore,
+        confidence: o.confidence as 'HIGH' | 'MEDIUM' | 'LOW',
+        recommendedActions: o.recommendedActions,
+        relatedVideoIds: o.relatedVideoIds,
+      })),
+      cadencePerWeek,
+      weeks,
+      startDate: new Date(),
+    });
+    await youtube.saveCalendarEntries({
+      organizationId: org.id,
+      youTubeChannelId: channel.id,
+      userId: user.id,
+      drafts,
+    });
+    revalidatePath('/app/youtube/calendar');
+    return { ok: true, message: `${drafts.length} calendar slot(s) planned.` };
+  } catch (e) {
+    return toError(e);
+  }
+}
+
+export async function createExperimentAction(input: {
+  hypothesis: string;
+  variable: string;
+  successMetric: string;
+  expectedDirection: 'INCREASE' | 'DECREASE';
+  experimentNote: string;
+}): Promise<ActionResult> {
+  try {
+    const { org, user } = await requirePermission('agent:run');
+    const channel = await youtube.getPrimaryChannel(org.id);
+    if (!channel) return { ok: false, error: 'Sync a channel first.' };
+    if (!input.hypothesis.trim() || !input.variable.trim() || !input.successMetric.trim()) {
+      return { ok: false, error: 'Hypothesis, variable, and success metric are required.' };
+    }
+    await youtube.createExperiment({
+      organizationId: org.id,
+      youTubeChannelId: channel.id,
+      userId: user.id,
+      hypothesis: input.hypothesis,
+      variable: input.variable,
+      baseline: {},
+      experimentNote: input.experimentNote,
+      successMetric: input.successMetric,
+      expectedDirection: input.expectedDirection,
+      startDate: new Date(),
+    });
+    revalidatePath('/app/youtube/experiments');
+    return { ok: true, message: 'Experiment created.' };
+  } catch (e) {
+    return toError(e);
+  }
+}
+
 export async function runAnalystAction(): Promise<ActionResult> {
   try {
     const { org, user } = await requirePermission('agent:run');

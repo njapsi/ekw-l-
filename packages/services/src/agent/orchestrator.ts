@@ -296,6 +296,7 @@ export async function* streamGrowthAgentTurn(
       message,
       orgContext,
       goals,
+      agentRunId: run.id,
     };
     const registry = deps.capabilities ?? CAPABILITY_BY_ID;
     const activeCaps = capIds

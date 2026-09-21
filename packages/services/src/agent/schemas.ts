@@ -13,6 +13,7 @@ export const CAPABILITY_IDS = [
   'org-context',
   'youtube-analyst',
   'youtube-monetization',
+  'youtube-growth',
   'tiktok-analyst',
   'seo-agent',
   'content-repurpose',

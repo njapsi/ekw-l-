@@ -6,6 +6,125 @@ reversal gets a new ADR that supersedes the old one.
 
 ---
 
+## ADR-0056 — YouTube Growth Agent: benchmarking, patterns, a documented priority score, calendar/experiments/anomaly detection — routed through the existing Tool Registry and Policy Engine, not a new one
+
+**Context.** Phase 6 asked for a production-grade "YouTube Growth Agent"
+covering channel/video analysis, benchmarking against the creator's own
+history, content-pattern detection, a priority-scored opportunity engine, a
+content calendar, an experiment system, statistical anomaly monitoring, and
+reporting — with an explicit, repeated instruction not to rebuild the
+application, not to create a second agent runtime, and not to bypass the
+Phase 4 Agent Runtime or the Phase 5 Tool Registry/Capability Registry/
+Policy Engine/Orchestrator. The audit-first step found most of the
+conceptual ground already covered under different names: real OAuth +
+sync + a YouTube Analyst Agent + a monetization assessment (the original
+integration), a Content Repurposing engine that already generates titles/
+descriptions/scripts/hooks from a synced video, and — critically — a Growth
+Agent orchestrator whose capability-execution path was a **direct function
+call**, never routed through Phase 5's `executeAgentTool`/Policy Engine —
+the one concrete architectural gap the brief demanded be closed for this
+domain.
+
+**Decision.**
+
+1. **Six new pure-logic modules, each with fixed, documented thresholds an
+   LLM never invents** (`packages/services/src/youtube/{benchmark,patterns,
+opportunities,experiments,calendar,monitoring}.ts`): per-video
+   benchmarking against the channel's own format-bucket median (≤180s =
+   Short, ≥1.5×/≤0.5× peer median, minimum 5 peers); topic/format pattern
+   detection reusing `metrics.ts`'s existing `topicClusters`; a five-factor
+   -minus-one **PRIORITY SCORE** (`0.35·evidenceStrength +
+0.25·historicalPerformance + 0.25·contentGap + 0.15·executionFeasibility`,
+   deliberately omitting an `audienceRelevance` factor this deployment has
+   no data for, rather than fabricating one); calendar generation that
+   cycles through ranked opportunities and falls back to an honest
+   "not yet assigned" placeholder rather than inventing a topic; experiment
+   evaluation with a 15%-relative-change inconclusive threshold; and
+   anomaly detection via a trailing-14-day mean/stdDev baseline at 2.5σ/4σ
+   thresholds. None of these call the YouTube API directly — all operate on
+   already-synced rows.
+2. **`YouTubeOpportunity`/`YouTubeExperiment`/`YouTubeCalendarEntry` mirror
+   existing model shapes rather than inventing new patterns** —
+   `YouTubeOpportunity` is structurally `MonetizationOpportunity` for a
+   different domain, reusing the existing `OpportunityStatus` enum and
+   `promoteOpportunityToTask`'s exact pattern; calendar entries reuse
+   `ContentIdea` via a nullable FK rather than duplicating idea storage.
+   One additive migration (`20260925120000_youtube_growth_agent`), diffed
+   against Prisma's own generated SQL.
+3. **New YouTube tools are a closed allowlist dispatched through the
+   existing Tool Executor, not a parallel authorization path.**
+   `agent/youtube-tools.ts` mirrors `research/tools.ts`'s exact shape
+   (`YOUTUBE_TOOL_NAMES`, Zod-validated `execute`, a `runYouTubeTool`
+   dispatcher) and every capability-gated tool calls
+   `assertCapabilityUsable` — the identical function
+   `integration-tools.ts`'s WordPress/Google tools already use, not a
+   second capability-checking mechanism. `tool-executor.ts` gained one new
+   `kindOf()` branch (`'youtube'`) and one explicit dispatch arm; the
+   existing rate limiting, `TOOL_CALLS` metering, and `AgentRunEvent`
+   timeline apply unchanged. Ten tools were built; explicitly **not**
+   built: five YouTube-specific content-generation tools (the Content
+   Repurposing engine's 13 deliverable types already cover this — building
+   a second path would violate hard rule 9), and separate weekly/monthly
+   report tools (the reporting engine's `YOUTUBE` type has no such
+   distinction — cadence is an automation-schedule concern).
+4. **One new orchestrator capability, `youtube-growth`, is the one
+   capability in the Growth Agent that calls `executeAgentTool` instead of
+   a `youtube/*` function directly** — closing the architectural gap the
+   audit found, for new functionality only. The two pre-existing YouTube
+   capabilities (`youtube-analyst`, `youtube-monetization`) are untouched,
+   per the brief's own backward-compatibility instruction.
+   `CapabilityContext` gained an optional `agentRunId` so a capability's
+   tool calls attach to the same turn's durable timeline the capability
+   itself is already recorded against.
+5. **No write/publish capability was added, because none can exist.**
+   `integrations/google.ts` only ever requests read-only YouTube scopes;
+   the capability matrix (`capability-matrix.ts`) reports all seven
+   write-shaped capabilities as permanently unavailable with one shared,
+   explicit reason, regardless of connection state — satisfying the
+   brief's own acceptance test that a publish request must be refused with
+   the real reason, never attempted.
+6. **No per-video Analytics-API dimension sync was attempted.** Traffic
+   -source and audience-demographic breakdowns need new Analytics-API
+   dimension combinations this environment has no live YouTube credentials
+   to verify — and the brief itself warns against constructing unsupported
+   metric/dimension combinations. `AUDIENCE_ANALYTICS_READ` /
+   `TRAFFIC_ANALYTICS_READ` report unavailable for this reason;
+   benchmarking instead uses the already-reliably-synced lifetime Data-API
+   stats.
+
+**Alternatives considered.**
+
+- _Expose all ten YouTube tools as live model-driven function-calling_ (the
+  `packages/ai` tool-calling primitive Phase 4 shipped but left unwired).
+  Rejected for the same reason Phase 4/5 left it unwired for every other
+  domain: this phase's job was to close the specific "direct call bypasses
+  the Tool Registry" gap for one new capability, not to flip on autonomous
+  multi-step tool-calling for the whole orchestrator — a materially larger,
+  higher-risk change than the brief asked for.
+- _Extend `sync.ts` for per-video Analytics dimensions anyway,
+  best-effort._ Rejected: an unverifiable API call shipped without live
+  testing is exactly the failure mode hard rule 1 and the brief's own
+  warning exist to prevent. Documented as deferred instead (§8 of
+  `docs/YOUTUBE-GROWTH-AGENT.md`).
+- _A parallel `youtube-content-generation` tool set._ Rejected — the
+  Content Repurposing engine already does this for a synced YouTube video;
+  a second path would be undetectable duplication that could drift from
+  the first.
+
+**Consequences.** The YouTube domain now has one capability
+(`youtube-growth`) that proves the Phase 4/5 architecture is load-bearing
+for genuinely new functionality, not merely built and left idle — a
+template for wiring the remaining domains (TikTok, SEO) through the same
+path in a future phase, should that be authorized. The five reserved-but-
+unproduced `YouTubeOpportunityType` values and the two unavailable
+analytics capabilities are an honest, disclosed gap rather than a silent
+one. No live YouTube OAuth credentials exist in this sandbox, so none of
+this phase's read paths against synced data, nor the pre-existing sync
+path they depend on, were re-verified against a real account — the same
+disclosed limitation as every prior YouTube-touching phase.
+
+---
+
 ## ADR-0055 — Tool ecosystem, MCP & agent orchestration: a Policy Engine, a real MCP client, and metered tool calls — native authorization paths untouched
 
 **Context.** Phase 5 asked for a production-grade "tool ecosystem" platform:

@@ -76,6 +76,11 @@ function makeDb(over: Partial<Record<string, unknown>> = {}) {
       ]),
     },
     task: { findFirst: vi.fn(async () => null) },
+    youTubeMetric: { findMany: vi.fn(async () => []) },
+    notification: {
+      create: vi.fn(async () => ({ id: 'n1' })),
+      upsert: vi.fn(async () => ({ id: 'n1' })),
+    },
     ...over,
   } as never;
 }
@@ -118,6 +123,49 @@ describe('dispatchTask routing', () => {
       expect.objectContaining({ accountId: 'acc_1' }),
       expect.anything(),
     );
+  });
+
+  it('YOUTUBE_ANALYSIS also runs anomaly detection and notifies on a clear spike', async () => {
+    const upsert = vi.fn<AnyFn>(async () => ({ id: 'n1', emailedAt: null }));
+    const dailyRows = Array.from({ length: 14 }, (_, i) => {
+      const date = new Date('2026-01-01T00:00:00Z');
+      date.setUTCDate(date.getUTCDate() + i);
+      return {
+        date,
+        views: BigInt(1000 + (i % 2 === 0 ? 20 : -20)),
+        estimatedMinutesWatched: 5000n,
+        likes: 50n,
+        comments: 10n,
+        shares: 5n,
+        subscribersGained: 20n,
+        subscribersLost: 5n,
+        estimatedRevenue: null,
+      };
+    });
+    dailyRows.push({
+      date: new Date('2026-01-15T00:00:00Z'),
+      views: 100_000n,
+      estimatedMinutesWatched: 5000n,
+      likes: 50n,
+      comments: 10n,
+      shares: 5n,
+      subscribersGained: 20n,
+      subscribersLost: 5n,
+      estimatedRevenue: null,
+    });
+    const r = await dispatchTask(
+      'YOUTUBE_ANALYSIS',
+      ctx,
+      makeDb({
+        youTubeMetric: { findMany: vi.fn(async () => dailyRows) },
+        notification: { upsert, create: vi.fn() },
+      }),
+    );
+    expect(upsert).toHaveBeenCalled();
+    const call = upsert.mock.calls[0]?.[0] as { create: Record<string, unknown> };
+    expect(call.create.kind).toBe('youtube.anomaly_detected');
+    expect(call.create.level).toMatch(/WARNING|CRITICAL/);
+    expect((r.detail as { anomaliesDetected: number }).anomaliesDetected).toBeGreaterThan(0);
   });
 
   it('WEBSITE_CRAWL → startCrawl on the verified website', async () => {

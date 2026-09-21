@@ -7,6 +7,7 @@ import {
 } from './tool-registry.js';
 import { INTEGRATION_TOOL_NAMES } from './integration-tools.js';
 import { RESEARCH_TOOL_NAMES } from '../research/tools.js';
+import { YOUTUBE_TOOL_NAMES } from './youtube-tools.js';
 
 vi.mock('../integrations/center.js', () => ({
   getConnectionCenter: vi.fn(async () => []),
@@ -19,10 +20,10 @@ vi.mock('../mcp/registry.js', () => ({
 }));
 
 describe('tool registry', () => {
-  it('lists metadata for exactly the closed native allowlist plus the research tools, nothing more', () => {
+  it('lists metadata for exactly the closed native allowlist plus the research and YouTube tools, nothing more', () => {
     const meta = listToolMetadata();
     expect(meta.map((m) => m.name).sort()).toEqual(
-      [...INTEGRATION_TOOL_NAMES, ...RESEARCH_TOOL_NAMES].sort(),
+      [...INTEGRATION_TOOL_NAMES, ...RESEARCH_TOOL_NAMES, ...YOUTUBE_TOOL_NAMES].sort(),
     );
     for (const m of meta) {
       expect(m.organizationScoped).toBe(true);

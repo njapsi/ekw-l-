@@ -16,3 +16,4 @@ export * from './policy-engine.js';
 export * from './capability-discovery.js';
 export * from './tool-envelope.js';
 export * from './tool-executor.js';
+export * from './youtube-tools.js';

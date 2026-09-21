@@ -12,10 +12,12 @@
 import { type Db } from '@growth-agent/db';
 import { createTask } from '../agent/tasks.js';
 import { runGrowthAgentTurnJob } from '../agent/jobs.js';
+import { createNotification } from '../notifications/index.js';
 import { runMonetizationScanJob } from '../monetization/jobs.js';
 import { generateReportJob } from '../reports/jobs.js';
 import { getPrimaryChannel } from '../youtube/read.js';
 import { runYouTubeAnalystJob } from '../youtube/jobs.js';
+import { describeAnomaly, detectAnomalies } from '../youtube/monitoring.js';
 import { getPrimaryAccount } from '../tiktok/read.js';
 import { runTikTokAnalystJob } from '../tiktok/jobs.js';
 import { listWebsites, getCrawlOverview } from '../seo/read.js';
@@ -67,6 +69,15 @@ export async function dispatchTask(
 
 // --- task implementations -------------------------------------------
 
+/**
+ * A NOTICE-severity statistical anomaly (~2.5σ) surfaces as a WARNING
+ * notification; a WARNING-severity one (~4σ, a genuinely extreme deviation)
+ * surfaces as CRITICAL. This is a display-level mapping only — the
+ * underlying statistical thresholds themselves live in `monitoring.ts` and
+ * are unaffected (Phase 6, Part 44).
+ */
+const ANOMALY_NOTIFICATION_LEVEL = { NOTICE: 'WARNING', WARNING: 'CRITICAL' } as const;
+
 async function runYouTubeAnalysis(ctx: DispatchContext, db: Db): Promise<DispatchResult> {
   const channel = await getPrimaryChannel(ctx.organizationId, db);
   if (!channel) throw new AppError('validation_failed', 'No YouTube channel is connected.');
@@ -74,11 +85,54 @@ async function runYouTubeAnalysis(ctx: DispatchContext, db: Db): Promise<Dispatc
     { organizationId: ctx.organizationId, channelId: channel.id, trigger: 'automation' },
     db,
   );
+
+  const dailyRows = await db.youTubeMetric.findMany({
+    where: {
+      organizationId: ctx.organizationId,
+      subjectType: 'CHANNEL',
+      subjectId: channel.channelId,
+    },
+    orderBy: { date: 'asc' },
+  });
+  const daily = dailyRows.map((d) => ({
+    date: d.date,
+    views: d.views,
+    estimatedMinutesWatched: d.estimatedMinutesWatched,
+    likes: d.likes,
+    comments: d.comments,
+    shares: d.shares,
+    subscribersGained: d.subscribersGained,
+    subscribersLost: d.subscribersLost,
+    estimatedRevenue: d.estimatedRevenue ? Number(d.estimatedRevenue) : null,
+  }));
+  const anomalies = detectAnomalies(daily);
+  for (const anomaly of anomalies) {
+    await createNotification(
+      {
+        organizationId: ctx.organizationId,
+        userId: ctx.ownerId,
+        kind: 'youtube.anomaly_detected',
+        level: ANOMALY_NOTIFICATION_LEVEL[anomaly.severity],
+        title: `YouTube: unusual ${anomaly.metric === 'netSubscribers' ? 'subscriber change' : anomaly.metric.replace(/([A-Z])/g, ' $1').toLowerCase()} on "${channel.title}"`,
+        body: describeAnomaly(anomaly),
+        linkPath: '/app/youtube/performance',
+        dedupeKey: `yt-anomaly:${channel.id}:${anomaly.metric}:${anomaly.date}`,
+        sourceType: 'youtube_channel',
+        sourceId: channel.id,
+      },
+      db,
+    );
+  }
+
   return {
-    summary: `Analysed YouTube channel "${channel.title}".`,
+    summary:
+      anomalies.length > 0
+        ? `Analysed YouTube channel "${channel.title}" — ${anomalies.length} anomaly(ies) detected.`
+        : `Analysed YouTube channel "${channel.title}".`,
     detail: {
       agentRunId: (res as { agentRunId?: string }).agentRunId ?? null,
       channelId: channel.id,
+      anomaliesDetected: anomalies.length,
     },
   };
 }

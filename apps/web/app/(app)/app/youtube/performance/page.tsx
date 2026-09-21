@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@growth-agent/ui';
+import { youtube } from '@growth-agent/services';
+import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@growth-agent/ui';
 import { YouTubeEmpty } from '@/components/app/youtube/youtube-empty';
 import { SyncButton } from '@/components/app/youtube/youtube-actions';
 import { requireActiveOrg } from '@/lib/auth';
@@ -8,14 +9,64 @@ import { loadYouTubeState } from '@/lib/youtube-state';
 
 export const metadata: Metadata = { title: 'YouTube — Performance' };
 
+const CLASSIFICATION_LABEL: Record<string, string> = {
+  OUTPERFORMING: 'Outperforming',
+  TYPICAL: 'Typical',
+  UNDERPERFORMING: 'Underperforming',
+  INSUFFICIENT_DATA: 'Not enough peers yet',
+};
+const CLASSIFICATION_VARIANT: Record<
+  string,
+  'default' | 'secondary' | 'outline' | 'success' | 'warning'
+> = {
+  OUTPERFORMING: 'success',
+  TYPICAL: 'secondary',
+  UNDERPERFORMING: 'warning',
+  INSUFFICIENT_DATA: 'outline',
+};
+
 export default async function YouTubePerformancePage() {
   const { org } = await requireActiveOrg();
   const state = await loadYouTubeState(org.id);
   if (state.kind !== 'ready') return <YouTubeEmpty state={state} />;
   const o = state.overview;
+  const benchmarks = await youtube.getRecentVideoBenchmarks(org.id, 50);
 
   return (
     <div className="space-y-6">
+      {benchmarks.length > 0 ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Video benchmark</CardTitle>
+            <CardDescription>
+              Each video compared to the median of its own format (Shorts vs. long-form) among your{' '}
+              {benchmarks.length} most recent videos — never a global YouTube average. Outperforming
+              is ≥1.5× the peer median; underperforming is ≤0.5×.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {benchmarks.slice(0, 10).map((b) => (
+              <div
+                key={b.videoId}
+                className="border-border flex items-center justify-between gap-3 border-b pb-2 last:border-0"
+              >
+                <div className="min-w-0">
+                  <p className="truncate text-sm">{b.title}</p>
+                  <p className="text-muted-foreground text-xs">
+                    {fullNumber(b.views)} views · {b.format === 'short' ? 'Short' : 'Long-form'}
+                    {b.ratioToPeerMedian != null
+                      ? ` · ${b.ratioToPeerMedian.toFixed(2)}× peer median`
+                      : ''}
+                  </p>
+                </div>
+                <Badge variant={CLASSIFICATION_VARIANT[b.classification] ?? 'outline'}>
+                  {CLASSIFICATION_LABEL[b.classification] ?? b.classification}
+                </Badge>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      ) : null}
       <Card>
         <CardHeader>
           <CardTitle className="text-base">Video catalogue</CardTitle>
