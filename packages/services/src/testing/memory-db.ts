@@ -102,18 +102,15 @@ function newId(prefix: string) {
   return `${prefix}_${seq.toString(36).padStart(4, '0')}`;
 }
 
+/** A single-field spec (`{field: 'desc'}`) or, matching real Prisma, an
+ *  array of them for multi-field tie-breaking (`[{a: 'desc'}, {b: 'desc'}]`). */
+export type OrderBy = Record<string, 'asc' | 'desc'> | Array<Record<string, 'asc' | 'desc'>>;
+
 export interface MemoryModel {
   rows: Row[];
   findUnique(args: { where: Where }): Promise<Row | null>;
-  findFirst(args?: {
-    where?: Where;
-    orderBy?: Record<string, 'asc' | 'desc'>;
-  }): Promise<Row | null>;
-  findMany(args?: {
-    where?: Where;
-    orderBy?: Record<string, 'asc' | 'desc'>;
-    take?: number;
-  }): Promise<Row[]>;
+  findFirst(args?: { where?: Where; orderBy?: OrderBy }): Promise<Row | null>;
+  findMany(args?: { where?: Where; orderBy?: OrderBy; take?: number }): Promise<Row[]>;
   create(args: { data: Row }): Promise<Row>;
   update(args: { where: Where; data: Row }): Promise<Row>;
   updateMany(args: { where?: Where; data: Row }): Promise<{ count: number }>;
@@ -125,11 +122,20 @@ export interface MemoryModel {
 
 function model(name: string, defaults: () => Row): MemoryModel {
   const rows: Row[] = [];
-  const sorted = (list: Row[], orderBy?: Record<string, 'asc' | 'desc'>) => {
+  const sorted = (list: Row[], orderBy?: OrderBy) => {
     if (!orderBy) return list;
-    const [field, dir] = Object.entries(orderBy)[0] ?? [];
-    if (!field) return list;
-    return [...list].sort((a, b) => (dir === 'desc' ? -1 : 1) * cmp(a[field], b[field]));
+    const specs = Array.isArray(orderBy) ? orderBy : [orderBy];
+    const fields = specs
+      .map((o) => Object.entries(o)[0])
+      .filter((e): e is [string, 'asc' | 'desc'] => Boolean(e));
+    if (fields.length === 0) return list;
+    return [...list].sort((a, b) => {
+      for (const [field, dir] of fields) {
+        const c = (dir === 'desc' ? -1 : 1) * cmp(a[field], b[field]);
+        if (c !== 0) return c;
+      }
+      return 0;
+    });
   };
   // The client API is async; the store is synchronous. `settle` bridges the
   // two so a throwing operation becomes a rejected promise, like Prisma's.
@@ -255,6 +261,15 @@ export function createMemoryDb() {
     searchConsoleSnapshot: model('gss', () => ({})),
     notification: model('ntf', () => ({ readAt: null })),
     auditLog: model('aud', () => ({})),
+    // loadOrgContext's connected-platform snapshot (agent/context.ts) — bare
+    // stubs so callers that go through the full org-context read (missions,
+    // the growth-agent orchestrator) don't hit "undefined.findFirst" against
+    // an org with nothing connected yet.
+    youTubeChannel: model('ytc', () => ({})),
+    tikTokAccount: model('tta', () => ({})),
+    crawl: model('crl', () => ({})),
+    task: model('tsk', () => ({ status: 'PENDING' })),
+    recommendation: model('rec', () => ({})),
     // Phase 2 identity models.
     aiGovernancePolicy: model('gov', () => ({})),
     user: model('usr', () => ({
@@ -283,6 +298,67 @@ export function createMemoryDb() {
       revokedById: null,
     })),
     automationRule: model('atr', () => ({})),
+    // Phase 10 — Growth Missions.
+    growthMission: model('gmi', () => ({
+      status: 'DRAFT',
+      priority: 'medium',
+      autonomyLevel: 'ASSISTED',
+      allowedPlatforms: [],
+      allowedActions: [],
+      budget: null,
+      constraints: null,
+      approvalPolicy: null,
+      currentStrategy: null,
+      currentProgress: null,
+      toolCallCount: 0,
+      taskCount: 0,
+      loopFailureCount: 0,
+      lastLoopAt: null,
+      nextLoopAt: null,
+      startDate: null,
+      targetDate: null,
+      activatedAt: null,
+      pausedAt: null,
+      completedAt: null,
+      cancelledAt: null,
+    })),
+    missionMilestone: model('mms', () => ({
+      status: 'PENDING',
+      targetDate: null,
+      startedAt: null,
+      completedAt: null,
+    })),
+    missionTask: model('mts', () => ({
+      milestoneId: null,
+      toolName: null,
+      toolInput: null,
+      dependsOnTaskIds: [],
+      risk: 'LOW',
+      approvalRequired: false,
+      status: 'PENDING',
+      priority: 'medium',
+      expectedResult: null,
+      actualResult: null,
+      resourceKey: null,
+      attempt: 0,
+      maxRetries: 2,
+      startedAt: null,
+      finishedAt: null,
+    })),
+    missionMetric: model('mmt', () => ({
+      unit: null,
+      currentValue: null,
+      previousValue: null,
+      targetValue: null,
+      trend: null,
+      measuredAt: new Date(),
+    })),
+    missionLearning: model('mln', () => ({
+      evidence: [],
+      confidence: 0.5,
+      relatedTaskId: null,
+    })),
+    missionEvent: model('mev', () => ({ metadata: null })),
   };
   return db;
 }

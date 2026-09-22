@@ -59,6 +59,8 @@ export const PERMISSIONS = [
   'api_key.view',
   'api_key.create',
   'api_key.revoke',
+  'mission.view',
+  'mission.manage',
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
@@ -78,6 +80,7 @@ const VIEWER: Permission[] = [
   'automation.view',
   'report.view',
   'settings.view',
+  'mission.view',
 ];
 
 /**
@@ -95,6 +98,7 @@ const MEMBER: Permission[] = [
   'report.create',
   'automation.create',
   'automation.update',
+  'mission.manage',
 ];
 
 const MANAGER: Permission[] = [

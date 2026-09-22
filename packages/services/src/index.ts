@@ -28,6 +28,7 @@ export * as config from './config/env.js';
 export { recordAudit, type AuditInput } from './audit/index.js';
 export * as audit from './audit/index.js';
 export * as dashboard from './dashboard/index.js';
+export * as missions from './missions/index.js';
 export {
   authorize,
   can,

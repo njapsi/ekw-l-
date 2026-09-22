@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
-import { ArrowRight, CheckCircle2, Circle, Target } from 'lucide-react';
+import { Plus, Target } from 'lucide-react';
 import {
   Badge,
   Button,
@@ -13,162 +13,122 @@ import {
   PageHeader,
 } from '@growth-agent/ui';
 import { requireActiveOrg } from '@/lib/auth';
-import { agent, automation } from '@growth-agent/services';
+import { missions } from '@growth-agent/services';
 
-export const metadata: Metadata = { title: 'Missions' };
+export const metadata: Metadata = { title: 'Growth Missions' };
 
-/**
- * Growth Missions (Part 36) — a presentational grouping of existing data,
- * not a new persisted entity. This is a UI-only phase (Part 1: "do not
- * rebuild the backend"), so a mission is derived from what already exists:
- * the org's connection state (`loadOrgContext`) and its real automation
- * rules, grouped by growth area. A future phase that gives missions their
- * own goal/schedule/permission fields would add a real `Mission` model;
- * until then this stays an aggregation, never a fabricated one.
- */
-const MISSIONS: {
-  key: string;
-  title: string;
-  goal: string;
-  taskTypes: automation.AutomationTaskTypeKey[];
-  isConnected: (ctx: agent.OrgContext) => boolean;
-  connectionLabel: string;
-}[] = [
-  {
-    key: 'youtube',
-    title: 'YouTube Growth',
-    goal: 'Increase qualified channel growth.',
-    taskTypes: ['YOUTUBE_ANALYSIS'],
-    isConnected: (ctx) => ctx.youtube.connected,
-    connectionLabel: 'YouTube',
-  },
-  {
-    key: 'tiktok',
-    title: 'TikTok Content',
-    goal: 'Grow reach through consistent, high-performing content.',
-    taskTypes: ['TIKTOK_ANALYSIS'],
-    isConnected: (ctx) => ctx.tiktok.connected,
-    connectionLabel: 'TikTok',
-  },
-  {
-    key: 'seo',
-    title: 'Website Optimization',
-    goal: 'Improve technical SEO health and search visibility.',
-    taskTypes: ['WEBSITE_CRAWL', 'SEO_ISSUE_ALERT'],
-    isConnected: (ctx) => ctx.seo.websites > 0,
-    connectionLabel: 'a website',
-  },
-  {
-    key: 'content',
-    title: 'Content Engine',
-    goal: 'Keep a steady pipeline of repurposed, on-brand content.',
-    taskTypes: ['CONTENT_OPPORTUNITY'],
-    isConnected: () => true,
-    connectionLabel: 'any connected source',
-  },
-  {
-    key: 'monetization',
-    title: 'Monetization',
-    goal: 'Surface and track new revenue opportunities.',
-    taskTypes: ['MONETIZATION_SCAN'],
-    isConnected: (ctx) => ctx.youtube.connected || ctx.tiktok.connected,
-    connectionLabel: 'YouTube or TikTok',
-  },
-];
+const STATUS_VARIANT: Record<string, 'success' | 'warning' | 'outline' | 'secondary' | 'destructive'> = {
+  ACTIVE: 'success',
+  DRAFT: 'outline',
+  PLANNING: 'secondary',
+  AWAITING_APPROVAL: 'warning',
+  PAUSED: 'warning',
+  BLOCKED: 'destructive',
+  COMPLETED: 'secondary',
+  FAILED: 'destructive',
+  CANCELLED: 'outline',
+};
+
+type Mission = Awaited<ReturnType<typeof missions.listMissions>>[number];
+
+function MissionCard({ mission }: { mission: Mission }) {
+  return (
+    <Link href={`/app/missions/${mission.id}`} className="block">
+      <Card className="hover:border-primary/50 transition-colors">
+        <CardHeader>
+          <div className="flex items-center justify-between gap-2">
+            <CardTitle className="text-base">{mission.name}</CardTitle>
+            <Badge variant={STATUS_VARIANT[mission.status] ?? 'outline'}>
+              {mission.status.replace(/_/g, ' ').toLowerCase()}
+            </Badge>
+          </div>
+          <CardDescription className="line-clamp-2">{mission.objective}</CardDescription>
+        </CardHeader>
+        <CardContent className="text-muted-foreground flex items-center justify-between text-xs">
+          <span>{mission.autonomyLevel.toLowerCase()} autonomy</span>
+          <span>{mission.taskCount} task(s)</span>
+        </CardContent>
+      </Card>
+    </Link>
+  );
+}
 
 export default async function MissionsPage() {
   const { org } = await requireActiveOrg();
-  const [context, automations] = await Promise.all([
-    agent.loadOrgContext(org.id),
-    automation.listAutomations(org.id),
-  ]);
+  const all = await missions.listMissions(org.id);
 
-  const hasAnyConnection =
-    context.youtube.connected || context.tiktok.connected || context.seo.websites > 0;
+  const active = all.filter((m) => m.status === 'ACTIVE');
+  const planned = all.filter((m) => ['DRAFT', 'PLANNING', 'AWAITING_APPROVAL'].includes(m.status));
+  const paused = all.filter((m) => ['PAUSED', 'BLOCKED'].includes(m.status));
+  const history = all.filter((m) => ['COMPLETED', 'FAILED', 'CANCELLED'].includes(m.status));
 
   return (
     <div className="space-y-6">
       <PageHeader
         title="Growth Missions"
-        description="Each mission groups a growth area with what it needs, its automations, and its recent status."
+        description="Define a goal; the AI plans it, works through it within the boundaries you set, and asks for approval before anything external happens."
+        actions={
+          <Button asChild>
+            <Link href="/app/missions/new">
+              <Plus className="size-4" /> New mission
+            </Link>
+          </Button>
+        }
       />
 
-      {!hasAnyConnection ? (
+      {all.length === 0 ? (
         <EmptyState
           icon={<Target />}
-          title="No missions active yet"
-          description="Connect a platform to activate its mission — each one tracks its own goal, connected sources, and automation status."
+          title="No missions yet"
+          description='Describe a growth goal — e.g. "grow my organic traffic over 90 days" — and the AI will propose a plan for you to review before anything runs.'
           action={
             <Button asChild>
-              <Link href="/app/integrations">Connect a platform</Link>
+              <Link href="/app/missions/new">Create a mission</Link>
             </Button>
           }
         />
       ) : (
-        <div className="grid gap-4 md:grid-cols-2">
-          {MISSIONS.map((mission) => {
-            const connected = mission.isConnected(context);
-            const rules = automations.filter((a) =>
-              (mission.taskTypes as string[]).includes(a.taskType),
-            );
-            const active = rules.filter((r) => r.status === 'ACTIVE');
-            return (
-              <Card key={mission.key}>
-                <CardHeader>
-                  <div className="flex items-center justify-between">
-                    <CardTitle className="text-base">{mission.title}</CardTitle>
-                    <Badge
-                      variant={
-                        connected ? (active.length > 0 ? 'success' : 'secondary') : 'outline'
-                      }
-                    >
-                      {connected ? (active.length > 0 ? 'Active' : 'Monitoring') : 'Not connected'}
-                    </Badge>
-                  </div>
-                  <CardDescription>{mission.goal}</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-3">
-                  <div className="flex items-center gap-2 text-sm">
-                    {connected ? (
-                      <CheckCircle2 className="text-success size-4" aria-hidden />
-                    ) : (
-                      <Circle className="text-muted-foreground size-4" aria-hidden />
-                    )}
-                    <span className={connected ? '' : 'text-muted-foreground'}>
-                      {connected
-                        ? `Connected: ${mission.connectionLabel}`
-                        : `Needs: ${mission.connectionLabel}`}
-                    </span>
-                  </div>
-                  {rules.length > 0 ? (
-                    <ul className="space-y-1.5">
-                      {rules.map((rule) => (
-                        <li key={rule.id} className="flex items-center gap-2 text-sm">
-                          {rule.lastRun?.status === 'SUCCEEDED' ? (
-                            <CheckCircle2 className="text-success size-4" aria-hidden />
-                          ) : (
-                            <Circle className="text-muted-foreground size-4" aria-hidden />
-                          )}
-                          <span className="text-muted-foreground flex-1 truncate">{rule.name}</span>
-                          <Badge variant="outline">{rule.status.toLowerCase()}</Badge>
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <p className="text-muted-foreground text-sm">
-                      No automation set up for this area yet.
-                    </p>
-                  )}
-                  <Button asChild variant="outline" size="sm">
-                    <Link href="/app/automations">
-                      {rules.length > 0 ? 'Manage automation' : 'Set up automation'}{' '}
-                      <ArrowRight className="size-3.5" />
-                    </Link>
-                  </Button>
-                </CardContent>
-              </Card>
-            );
-          })}
+        <div className="space-y-8">
+          {active.length > 0 ? (
+            <section className="space-y-3">
+              <h2 className="text-sm font-medium">Active</h2>
+              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                {active.map((m) => (
+                  <MissionCard key={m.id} mission={m} />
+                ))}
+              </div>
+            </section>
+          ) : null}
+          {planned.length > 0 ? (
+            <section className="space-y-3">
+              <h2 className="text-sm font-medium">Planned</h2>
+              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                {planned.map((m) => (
+                  <MissionCard key={m.id} mission={m} />
+                ))}
+              </div>
+            </section>
+          ) : null}
+          {paused.length > 0 ? (
+            <section className="space-y-3">
+              <h2 className="text-sm font-medium">Paused / blocked</h2>
+              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                {paused.map((m) => (
+                  <MissionCard key={m.id} mission={m} />
+                ))}
+              </div>
+            </section>
+          ) : null}
+          {history.length > 0 ? (
+            <section className="space-y-3">
+              <h2 className="text-sm font-medium">History</h2>
+              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                {history.map((m) => (
+                  <MissionCard key={m.id} mission={m} />
+                ))}
+              </div>
+            </section>
+          ) : null}
         </div>
       )}
     </div>

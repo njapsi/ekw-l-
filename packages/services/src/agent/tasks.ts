@@ -25,6 +25,9 @@ export interface CreateTaskInput {
   affectedRefs?: string[];
   sourceRecommendationId?: string;
   sourceConversationId?: string;
+  /** Phase 10 — set when a Growth Mission's execution loop opened this task
+   *  as a human decision point. */
+  sourceMissionTaskId?: string;
   requiresExternalAction?: boolean;
   externalActionKind?: string;
 }
@@ -43,6 +46,7 @@ export async function createTask(input: CreateTaskInput, db: Db = prisma) {
       affectedRefs: (input.affectedRefs ?? []).slice(0, 50),
       sourceRecommendationId: input.sourceRecommendationId,
       sourceConversationId: input.sourceConversationId,
+      sourceMissionTaskId: input.sourceMissionTaskId,
       requiresExternalAction: input.requiresExternalAction ?? false,
       externalActionKind: input.externalActionKind,
     },

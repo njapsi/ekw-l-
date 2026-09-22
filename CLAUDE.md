@@ -1449,6 +1449,65 @@ experiments,calendar,monitoring}.ts`), module-for-module mirrors of the
   -touching phase since the original integration. See
   `docs/WORDPRESS-GROWTH-AGENT.md`, `docs/WORDPRESS-INTEGRATION.md`
   (§7), ADR-0058.
+- **Growth Missions — cross-platform orchestration** ✅ (operator's
+  "Phase 10"): a user-defined goal ("grow my organic traffic") the AI
+  plans, executes, measures, and adapts across YouTube/TikTok/SEO/
+  WordPress — entirely inside the existing security/RBAC/approval/audit/
+  tenant-isolation systems, no separate autonomous-agent security model.
+  Six new tables (`GrowthMission`, `MissionMilestone`, `MissionTask`,
+  `MissionMetric`, `MissionLearning`, `MissionEvent`); every other named
+  model from the brief folds into something that already exists
+  (dependencies → a plain array column; actions/approvals → the existing
+  `IntegrationActionRequest`, extended with `sourceMissionTaskId`;
+  execution trace → `MissionEvent` + a new nullable `AgentRun.missionId`;
+  budget/constraints → JSON fields) — see ADR-0059 for the full mapping.
+  Four autonomy levels (`missions/policy.ts`) gate **only** whether the
+  unattended background sweep may attempt a step on its own — never
+  whether the step is authorized at all, since every WRITE/PUBLISH-shaped
+  tool across YouTube/TikTok/WordPress already only ever files a pending
+  approval as its own direct effect (Phases 6-9's own convention),
+  structurally unbypassable regardless of autonomy level. The evidence
+  -based planner (`missions/planner.ts`) derives milestones/tasks only
+  from real `OrgContext` signals, never fabricating a task for a
+  disconnected platform. `missions/delegation.ts` dispatches through the
+  existing `executeAgentTool` (YouTube/TikTok/WordPress) or the same
+  tenant-scoped SEO functions `automation/dispatch.ts` already calls —
+  zero new authorization paths. `missions/loop.ts::runMissionTick` runs
+  one bounded step per call (mirrors `automation/runner.ts`'s owner
+  -recheck/retry/backoff pattern exactly), with stop conditions
+  (deadline/budget/limits/disconnection/repeated failure), a resource
+  -key concurrency guard, and narrow, mechanical conflict detection
+  (overlapping platforms across active missions, flagged not
+  auto-resolved). Mission background execution (`mission.sweep`/
+  `mission.tick`/daily brief/weekly review) reactivates the **previously
+  -idle `agent-run` BullMQ queue** (idle since Phase 4/ADR-0054) rather
+  than adding a new one. New `mission.view`/`mission.manage` RBAC
+  permissions (VIEWER/MEMBER+). Migration `20260928120000_growth_missions`
+  is fully additive. New `/app/missions` dashboard (replacing Phase 3's
+  presentational aggregation) + `/app/missions/new` wizard +
+  `/app/missions/[id]` detail page (strategy, milestones/tasks, metrics,
+  mission-scoped approvals reusing the existing approvals queue,
+  learnings, activity timeline); `apps/web/src/server/mission-actions.ts`;
+  read-only `/api/missions/*`. **Two real bugs caught by this phase's own
+  tests before shipping**: a mission whose task graph terminated with a
+  real failure was reported `COMPLETED` instead of `FAILED`; a task
+  depending on an already-`BLOCKED` task (rather than directly on a
+  `FAILED` one) never cascaded to `BLOCKED` and would have sat in
+  `PENDING` limbo forever — both fixed, see ADR-0059 §9 writeup in
+  `docs/GROWTH-MISSIONS.md`. **A third, pre-existing bug found in
+  passing**: `governance/index.ts` had its own stale copy of
+  `AUTOMATION_TASK_TYPES`, missing Phase 9's `WORDPRESS_CONTENT_REFRESH`
+  — silently blocking that automation for every org on default governance
+  settings; fixed by importing the one real list instead of duplicating
+  it. Gates green: lint 14/14, typecheck 14/14, **`packages/services`
+  1278 tests** (+79), tenant-scope clean, web build. **Verification
+  limit, disclosed**: no live platform data or a real Postgres instance
+  was available in this sandbox — every new module verified by unit/
+  integration-style tests against hand-built fixtures and the shared
+  in-memory DB harness (extended with `youTubeChannel`/`tikTokAccount`/
+  `crawl`/`task`/`recommendation` stubs and real multi-field `orderBy`
+  support) only; no mission-specific adversarial red-team pass was run.
+  See `docs/GROWTH-MISSIONS.md`, `docs/PHASE-10-REPORT.md`, ADR-0059.
 - **Still outstanding:** Postgres **RLS** (ADR-0035, re-affirmed in
   ADR-0052 — application-layer scoping + the CI tenant-scope lint +
   integration tests, now actually running, remain the accepted mitigation);
@@ -1482,8 +1541,11 @@ experiments,calendar,monitoring}.ts`), module-for-module mirrors of the
   (no API key infrastructure exists); a dependency-graph orchestrator, a
   tool-result cache, and stdio MCP transport (all deliberately deferred,
   ADR-0055); activating the worker's `agent-run`
-  BullMQ queue with a real background-run product surface (the queue and
-  processor are fully built and idle, per ADR-0054); a per-turn wall-clock
+  BullMQ queue with a real background-run product surface (**closed by
+  Phase 10/ADR-0059** — the queue now carries real, live `mission.sweep`/
+  `mission.tick`/daily-brief/weekly-review jobs; an interactive chat
+  "background turn" product surface, the original brief's own example,
+  is still not built); a per-turn wall-clock
   `MAX_RUNTIME`/`TIMED_OUT` (the status value is reserved, nothing sets it
   yet); rolling a turn's full sub-agent AI cost up into its parent
   `AgentRun`'s displayed `costUsd` (billing enforcement is already
@@ -1494,7 +1556,16 @@ experiments,calendar,monitoring}.ts`), module-for-module mirrors of the
   reporting follow-ups (charts in the PDF, scheduled report packs); automation
   follow-ups (timezone-aware schedules, a real notification channel);
   observability follow-ups (OpenTelemetry tracing spans, pushed threshold
-  alerts, abuse-monitoring events + suspend, admin write actions). Do not
+  alerts, abuse-monitoring events + suspend, admin write actions); a
+  mission-specific adversarial/red-team test pass (Phase 10 reuses the
+  existing shared prompt-injection/instruction-hierarchy tests unchanged,
+  but nothing specifically attacks the mission loop/planner/policy layer
+  yet); a per-org daily-brief/weekly-review schedule and opt-out (UTC-only
+  fixed intervals today, matching automation's own disclosed limitation);
+  persisted brief/review history (each is computed fresh and delivered via
+  `Notification`, never stored as its own queryable row); a wall-clock
+  timeout on a single mission loop tick (relies on the underlying tool's
+  own timeout today, same disclosed gap as the Phase 4 turn loop). Do not
   start any of them without an explicit instruction.
 
 ### Running it locally

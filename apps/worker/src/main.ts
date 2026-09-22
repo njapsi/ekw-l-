@@ -14,7 +14,7 @@ import { type TikTokJob, processTikTokJob } from './processors/tiktok.js';
 import { type YouTubeJob, processYouTubeJob } from './processors/youtube.js';
 import { startHealthServer } from './health-server.js';
 import { instrumentJob, startHeartbeat } from './observability.js';
-import { QUEUE_NAMES, automationQueue, connection, integrationsQueue } from './queues.js';
+import { QUEUE_NAMES, agentRunQueue, automationQueue, connection, integrationsQueue } from './queues.js';
 
 /**
  * Worker entrypoint. The YouTube, TikTok, SEO, Growth Agent, content-pipeline,
@@ -92,7 +92,24 @@ async function registerSchedules(): Promise<void> {
       removeOnFail: 50,
     },
   );
-  logger.info('automation + lifecycle + integration scheduler ticks registered');
+  // Phase 10: Growth Mission execution + digests, on the previously-idle
+  // agent-run queue (`docs/AGENT-RUNTIME.md` §8) rather than a new queue.
+  await agentRunQueue.add(
+    'mission-sweep',
+    { type: 'mission.sweep' },
+    { repeat: { every: 60_000 }, jobId: 'mission-sweep', removeOnComplete: 50, removeOnFail: 50 },
+  );
+  await agentRunQueue.add(
+    'mission-daily-brief',
+    { type: 'mission.daily.brief' },
+    { repeat: { every: 86_400_000 }, jobId: 'mission-daily-brief', removeOnComplete: 20, removeOnFail: 20 },
+  );
+  await agentRunQueue.add(
+    'mission-weekly-review',
+    { type: 'mission.weekly.review' },
+    { repeat: { every: 7 * 86_400_000 }, jobId: 'mission-weekly-review', removeOnComplete: 10, removeOnFail: 10 },
+  );
+  logger.info('automation + lifecycle + integration + mission scheduler ticks registered');
 }
 
 function startWorker(name: string, processor: Processor) {
@@ -123,6 +140,7 @@ async function shutdown(signal: string) {
   await Promise.all(workers.map((w) => w.close()));
   await automationQueue.close();
   await integrationsQueue.close();
+  await agentRunQueue.close();
   await closeSeoRenderer();
   await observability.closeObservabilityQueues();
   await observability.closeObservabilityRedis();

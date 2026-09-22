@@ -6,6 +6,125 @@ reversal gets a new ADR that supersedes the old one.
 
 ---
 
+## ADR-0059 — Growth Missions: cross-platform orchestration reuses the existing agent runtime, approval queue, and Tool Executor in full; autonomy only ever gates unattended dispatch, never authorization; two real bugs caught by this phase's own tests
+
+**Context.** Phase 10 asked for "Growth Missions" — a user-defined goal
+that the AI plans, executes, measures, and adapts across YouTube/TikTok/
+SEO/WordPress, explicitly required to "operate inside the existing
+security, RBAC, tool-permission, approval, audit, and tenant-isolation
+systems" and explicitly forbidding a separate security model for
+autonomous agents. The mandatory audit-first step found: (1) every
+WRITE/PUBLISH-shaped tool built in Phases 6-9 already only ever *files* a
+pending `IntegrationActionRequest` as its own direct effect — never
+executes — so the approval floor is structurally unbypassable from a tool
+call, independent of anything this phase adds; (2) the `agent-run` BullMQ
+queue was fully built and registered since Phase 4 but nothing had ever
+enqueued a job to it (confirmed by grep, `docs/AGENT-RUNTIME.md` §8); (3)
+no `Mission` model exists anywhere, and the current `/app/missions` page
+is an explicitly-labelled presentational aggregation with no persisted
+entity; (4) `Task` is a flat checklist item with no dependency support —
+genuinely different in shape from what a task graph needs; (5) a real,
+pre-existing bug: `governance/index.ts` kept its own stale copy of
+`AUTOMATION_TASK_TYPES`, missing Phase 9's `WORDPRESS_CONTENT_REFRESH`
+addition to the real list in `automation/schemas.ts`, silently blocking
+that automation type for every org on default governance settings.
+
+**Decision.**
+
+1. **Autonomy levels gate unattended dispatch only, never authorization.**
+   `missions/policy.ts::evaluateMissionPolicy` decides whether the
+   background sweep (`loop.ts::runMissionTick`) may attempt a task on its
+   own; it never decides whether the underlying action is safe to take at
+   all — that remains entirely the job of `executeAgentTool`'s existing
+   authorization stack and, for any WRITE/PUBLISH-shaped tool, the
+   `IntegrationActionRequest` approval floor (finding #1). Concretely:
+   LOW-risk (read/analyze) tasks auto-run at every autonomy level,
+   including ADVISORY (§5's own "analyze, research, recommend" with "no
+   actions" is about *actions*, not analysis); MEDIUM-risk tasks
+   (e.g. a safe DRAFT-level tool) only auto-run unattended under
+   CONTROLLED, needing an explicit human "run now" click at every other
+   level; HIGH/CRITICAL never auto-run at any level, which is moot for
+   real safety (finding #1 already forces approval) but keeps the
+   sweep's own stated intent honest.
+2. **The `agent-run` queue is reactivated, not replaced.** Mission
+   background execution (`mission.sweep`, `mission.tick`,
+   `mission.daily.brief`, `mission.weekly.review`) are new job types on
+   the SAME, previously-idle queue `apps/worker/src/processors/agent.ts`
+   already served, closing finding #2 in the most literal reading of "do
+   not create a second worker system" available. No new BullMQ queue was
+   added.
+3. **Six new tables, and no more, per finding #3/#4 plus the brief's own
+   §44 "do not create duplicate task/approval/event systems" instruction**:
+   `GrowthMission`, `MissionMilestone`, `MissionTask`, `MissionMetric`,
+   `MissionLearning`, `MissionEvent`. Every other named model in the
+   brief's §44 list folds into something that already exists:
+   `MissionDependency` → a plain `dependsOnTaskIds: String[]` column
+   (`missions/task-graph.ts`'s pure functions need no join table);
+   `MissionAction`/`MissionApproval` → the existing
+   `IntegrationActionRequest`, extended with a `sourceMissionTaskId`
+   provenance FK mirroring Phase 9's `sourceCrawlIssueId` exactly;
+   `MissionExecution` → `MissionEvent` (mirroring `AgentRunEvent`'s
+   design) plus a new nullable `AgentRun.missionId` FK for the rare
+   model-driven mission operation; `MissionBudget`/`MissionConstraint` →
+   JSON fields on `GrowthMission` (one budget/constraint config per
+   mission, no relational need). `MissionLearning` is the one addition
+   that could look redundant with `OrgMemory` but isn't: `OrgMemory.value`
+   is free prose for cross-turn goals/preferences, while a learning record
+   is the brief's own explicit, structured Observation/Hypothesis/
+   Learning/Decision distinction with confidence and evidence — a
+   different shape for a different reader.
+4. **A propose-only tool's `SUCCESS` envelope is not task completion.**
+   `delegation.ts` detects (via the same Tool Registry
+   `category`/`requiresApproval` metadata every tool already carries,
+   never a second classification) when a tool's own effect was only to
+   file an approval request, and reports `requires_approval` rather than
+   `ok` — otherwise a `MissionTask` would have been marked `SUCCEEDED`
+   before a human ever approved anything.
+5. **Governance's stale task-type list (finding #5) is fixed by import,
+   not by patching the copy.** `governance/index.ts` now imports
+   `AUTOMATION_TASK_TYPES` from `automation/schemas.ts` — the one real
+   list — instead of maintaining its own, closing this class of drift
+   permanently rather than just adding the one missing value.
+6. **Conflict detection is deliberately narrow** (§35): only a mechanical,
+   checkable fact — two ACTIVE missions sharing a platform — is flagged;
+   free-text policy conflicts (e.g. "5/week" vs. "2/week") are not parsed,
+   since doing so reliably without guessing intent isn't possible, and a
+   wrong guess would itself violate hard rule 1. Activation is never
+   blocked by a detected overlap, per the brief's own "flag: human
+   decision required," not "block."
+
+**Alternatives considered.**
+
+- _A new `MissionApproval` table, separate from `IntegrationActionRequest`._
+  Rejected — every mission-initiated write already produces a real
+  `IntegrationActionRequest` through the existing `*-tools.ts` ACTION-kind
+  executors; a parallel approval table would fragment the single approval
+  queue the brief itself asks to reuse (§16/§26).
+- _A new dedicated BullMQ queue for missions._ Rejected — the `agent-run`
+  queue exists, is correctly registered, and has been idle since Phase 4;
+  using it is a more literal satisfaction of "do not create a second
+  worker system" than adding a same-shaped new one would be.
+- _Report a mission `COMPLETED` whenever its task graph reaches a terminal
+  state, regardless of outcome._ Rejected once `loop.test.ts`'s own
+  cascading-failure test caught this producing a false-success report for
+  a mission whose only task failed — fixed to check for any `FAILED`/
+  `BLOCKED` task among the terminal set and report `FAILED` instead (§9 of
+  `docs/GROWTH-MISSIONS.md` has the full bug writeup, including a related
+  `task-graph.ts` cascade bug the same test caught).
+
+**Consequences.** Growth Missions add a real orchestration layer without
+adding a second authorization system — every safety property a mission's
+task can violate is enforced in code this phase calls, not code this phase
+wrote. The `agent-run` queue is no longer idle infrastructure, closing a
+gap disclosed since Phase 4/ADR-0054. Two real, disclosed limitations:
+no mission-specific adversarial red-team pass was run this phase (the
+shared prompt-injection/instruction-hierarchy tests were not extended with
+mission-specific attack scenarios), and no live platform data or a real
+Postgres instance was available to verify against — the same disclosed
+limitation as every prior phase in this sandbox.
+
+---
+
 ## ADR-0058 — WordPress Growth Agent: SEO becomes an execution target through the existing approval queue, not a new write path; a diff-performance bug found and fixed; "Phase 8 SEO Growth Agent" does not exist as claimed
 
 **Context.** Phase 9 asked for a production-grade "WordPress Growth Agent"

@@ -219,6 +219,12 @@ model Organization {
   aiGovernancePolicy        AiGovernancePolicy?
   mcpServers                McpServer[]
   mcpServerTools            McpServerTool[]
+  growthMissions            GrowthMission[]
+  missionMilestones         MissionMilestone[]
+  missionTasks              MissionTask[]
+  missionMetrics            MissionMetric[]
+  missionLearnings          MissionLearning[]
+  missionEvents             MissionEvent[]
 
   // Set when an OWNER requested deletion; the org is hidden immediately and a
   // grace-period purge job hard-deletes it (cascading every tenant row) after
@@ -738,6 +744,11 @@ model AgentRun {
   /// AIMessage; nullable for non-conversational agent runs (e.g. an
   /// automation-triggered analyst run).
   conversationId   String?
+  /// Phase 10 — set when this run is a mission-driven model call (planning
+  /// narrative, daily brief, weekly review), so a mission's detail page can
+  /// list its own "agent reasoning summary" entries without a JSON scan.
+  /// Null for every ordinary chat/automation-triggered run.
+  missionId        String?
   agent            String
   status           AgentRunStatus @default(QUEUED)
   trigger          String?
@@ -768,6 +779,7 @@ model AgentRun {
   updatedAt        DateTime       @updatedAt
 
   organization    Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  mission         GrowthMission?    @relation(fields: [missionId], references: [id], onDelete: SetNull)
   recommendations Recommendation[]
   contentIdeas    ContentIdea[]
   aiMessages      AIMessage[]
@@ -775,6 +787,7 @@ model AgentRun {
 
   @@index([organizationId, agent, createdAt])
   @@index([organizationId, conversationId])
+  @@index([missionId])
   @@map("agent_runs")
 }
 
@@ -1571,6 +1584,9 @@ model Task {
   affectedRefs           String[]
   sourceRecommendationId String?
   sourceConversationId   String?
+  /// Phase 10 — set when a Growth Mission task surfaced this as a
+  /// human-facing checklist item (e.g. "review this draft before approving").
+  sourceMissionTaskId    String?
   /// External-system actions (publish, metadata change) need explicit
   /// confirmation via the owning feature's approval flow — never executed here.
   requiresExternalAction Boolean              @default(false)
@@ -1580,11 +1596,13 @@ model Task {
   createdAt              DateTime             @default(now())
   updatedAt              DateTime             @updatedAt
 
-  organization Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  conversation AIConversation? @relation(fields: [sourceConversationId], references: [id], onDelete: SetNull)
+  organization      Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  conversation      AIConversation? @relation(fields: [sourceConversationId], references: [id], onDelete: SetNull)
+  sourceMissionTask MissionTask?    @relation(fields: [sourceMissionTaskId], references: [id], onDelete: SetNull)
 
   @@index([organizationId, status])
   @@index([organizationId, domain])
+  @@index([sourceMissionTaskId])
   @@map("tasks")
 }
 
@@ -2554,12 +2572,20 @@ model IntegrationActionRequest {
   /// re-check and, if the issue no longer reproduces, mark it FIXED. Null for
   /// every action not proposed from an SEO finding.
   sourceCrawlIssueId String?
+  /// Phase 10 — set when this request was proposed by a Growth Mission's
+  /// execution loop (`missions/delegation.ts`). A successful EXECUTED /
+  /// FAILED / REJECTED transition notifies the mission loop so the
+  /// originating `MissionTask` leaves WAITING_APPROVAL. Null for every
+  /// action not proposed by a mission.
+  sourceMissionTaskId String?
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   sourceCrawlIssue   CrawlIssue?  @relation(fields: [sourceCrawlIssueId], references: [id], onDelete: SetNull)
+  sourceMissionTask  MissionTask? @relation(fields: [sourceMissionTaskId], references: [id], onDelete: SetNull)
 
   @@index([organizationId, status, createdAt])
   @@index([sourceCrawlIssueId])
+  @@index([sourceMissionTaskId])
   @@map("integration_action_requests")
 }
 
@@ -2789,4 +2815,339 @@ model AiGovernancePolicy {
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   @@map("ai_governance_policies")
+}
+
+// ===========================================================================
+// Phase 10 — Growth Missions (cross-platform autonomous orchestration)
+// ===========================================================================
+//
+// A mission is a user-defined growth objective ("grow my organic traffic")
+// that the AI plans, executes (through the EXISTING Phase 4/5 agent runtime,
+// Phase 1 approval queue, and per-domain tool surfaces — never a parallel
+// execution path), measures, and adapts. Autonomy is bounded by
+// `autonomyLevel` + `limits`, and every WRITE/PUBLISH/DELETE action still
+// goes through `IntegrationActionRequest` regardless of autonomy level —
+// this schema cannot express an unsupervised mission any more than
+// `AiGovernancePolicy` can express an unsupervised agent (ADR-0059).
+
+enum MissionStatus {
+  DRAFT
+  PLANNING
+  AWAITING_APPROVAL
+  ACTIVE
+  PAUSED
+  BLOCKED
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+/// The four levels from the brief, and no more (Part 5: "do not introduce a
+/// higher level than necessary"). ADVISORY/ASSISTED never run in the
+/// background sweep — see `missions/loop.ts`. Publishing, deleting,
+/// financial, and consequential-modification actions require approval at
+/// every level; the level only ever widens which *unsupervised, low-risk*
+/// actions may run without a per-action approval prompt.
+enum MissionAutonomyLevel {
+  ADVISORY
+  ASSISTED
+  SUPERVISED
+  CONTROLLED
+}
+
+enum MissionPlatform {
+  YOUTUBE
+  TIKTOK
+  SEO
+  WORDPRESS
+  WEBSITE
+  CROSS_PLATFORM
+}
+
+enum MissionMilestoneStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  BLOCKED
+  SKIPPED
+}
+
+enum MissionTaskStatus {
+  PENDING
+  READY
+  RUNNING
+  WAITING_APPROVAL
+  BLOCKED
+  SUCCEEDED
+  FAILED
+  CANCELLED
+  SKIPPED
+}
+
+enum MissionTaskRisk {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum MissionMetricKind {
+  LEADING
+  LAGGING
+}
+
+enum MissionLearningType {
+  OBSERVATION
+  HYPOTHESIS
+  LEARNING
+  DECISION
+}
+
+/// Mirrors `AgentRunEventType`'s exact "one row per real transition" design
+/// (Phase 4) — the durable, auditable mission timeline (Part 25/42).
+enum MissionEventType {
+  MISSION_CREATED
+  PLAN_GENERATED
+  MISSION_ACTIVATED
+  MILESTONE_STARTED
+  MILESTONE_COMPLETED
+  TASK_CREATED
+  TASK_READY
+  TASK_STARTED
+  TASK_SUCCEEDED
+  TASK_FAILED
+  TASK_BLOCKED
+  TASK_SKIPPED
+  APPROVAL_REQUESTED
+  APPROVAL_GRANTED
+  APPROVAL_REJECTED
+  METRIC_UPDATED
+  LEARNING_RECORDED
+  REPLAN_TRIGGERED
+  MISSION_PAUSED
+  MISSION_RESUMED
+  MISSION_BLOCKED
+  MISSION_COMPLETED
+  MISSION_FAILED
+  MISSION_CANCELLED
+  LIMIT_REACHED
+  CONFLICT_DETECTED
+  NOTIFICATION_SENT
+}
+
+/// The mission itself. `budget`/`constraints`/`limits`/`approvalPolicy`/
+/// `successMetrics`/`currentStrategy`/`currentProgress` are Zod-validated
+/// JSON (`packages/services/src/missions/schemas.ts`) rather than a table
+/// each — a mission has exactly one of each, so a relational table would add
+/// no query capability the brief actually needs (mirrors
+/// `AiGovernancePolicy.policy`'s existing precedent). `MissionDependency`,
+/// `MissionAction`, `MissionApproval`, `MissionExecution`, `MissionBudget`
+/// and `MissionConstraint` from the brief's own model list are deliberately
+/// not separate tables — see `docs/GROWTH-MISSIONS.md` §DB for exactly which
+/// existing/new model each folds into and why.
+model GrowthMission {
+  id               String               @id @default(cuid())
+  organizationId   String
+  createdById      String
+  name             String
+  description      String               @db.Text
+  objective        String               @db.Text
+  status           MissionStatus        @default(DRAFT)
+  priority         String               @default("medium")
+  autonomyLevel    MissionAutonomyLevel @default(ASSISTED)
+  startDate        DateTime?
+  targetDate       DateTime?
+  allowedPlatforms MissionPlatform[]
+  /// Closed allowlist of tool-name / capability-id prefixes this mission may
+  /// dispatch — re-checked against the REAL tool registry at execution time
+  /// (`missions/policy.ts`), never trusted as self-sufficient authorization.
+  allowedActions   String[]
+  /// `MissionSuccessMetricDef[]` — key/label/kind(leading|lagging)/target/unit.
+  successMetrics   Json
+  /// `{ maxUsd?, spentUsd, currency }` — Part 34: the architecture exists even
+  /// though no paid autonomous action is implemented yet.
+  budget           Json?
+  /// Free-form, user-authored constraints shown back to the user verbatim
+  /// (Part 8) — enforcement is via `limits`/`allowedActions`/governance, not
+  /// this field, which is display/context only.
+  constraints      Json?
+  /// `MissionLimits` — maxToolCalls/maxTasks/maxDurationDays/maxRetries/
+  /// maxPublishPerWeek/maxContentGenerationsPerWeek (Part 36).
+  limits           Json
+  /// Optional per-mission tightening on top of org governance; can only ever
+  /// be equal to or stricter than `AiGovernancePolicy` — never looser
+  /// (enforced in code, `missions/policy.ts`, not just by convention).
+  approvalPolicy   Json?
+  /// The generated plan: objective/current state/target state/strategy
+  /// narrative/assumptions/risks (Part 8) — milestones/tasks are real rows,
+  /// not duplicated here.
+  currentStrategy  Json?
+  /// Cached snapshot for the dashboard list view (Part 23) — recomputed by
+  /// `missions/metrics.ts`, never hand-edited.
+  currentProgress  Json?
+  toolCallCount    Int                  @default(0)
+  taskCount        Int                  @default(0)
+  /// Consecutive loop-tick failures — mirrors `AutomationRule.failureCount`'s
+  /// escalation convention (`missions/loop.ts`).
+  loopFailureCount Int                  @default(0)
+  lastLoopAt       DateTime?
+  nextLoopAt       DateTime?
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+  activatedAt      DateTime?
+  pausedAt         DateTime?
+  completedAt      DateTime?
+  cancelledAt      DateTime?
+
+  organization Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  milestones   MissionMilestone[]
+  tasks        MissionTask[]
+  metrics      MissionMetric[]
+  learnings    MissionLearning[]
+  events       MissionEvent[]
+  agentRuns    AgentRun[]
+
+  @@index([organizationId, status])
+  @@index([organizationId, createdAt])
+  @@index([status, nextLoopAt])
+  @@map("growth_missions")
+}
+
+model MissionMilestone {
+  id             String                 @id @default(cuid())
+  missionId      String
+  organizationId String
+  title          String
+  description    String                 @db.Text
+  /// Display/execution order — milestones are sequential by convention, not
+  /// a full DAG (only tasks need dependency edges, Part 11).
+  order          Int
+  status         MissionMilestoneStatus @default(PENDING)
+  targetDate     DateTime?
+  startedAt      DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+
+  mission      GrowthMission @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  tasks        MissionTask[]
+
+  @@index([missionId, order])
+  @@map("mission_milestones")
+}
+
+model MissionTask {
+  id               String            @id @default(cuid())
+  missionId        String
+  organizationId   String
+  milestoneId      String?
+  title            String
+  description      String            @db.Text
+  platform         MissionPlatform
+  /// The Phase 5 tool name this task dispatches to via `executeAgentTool`
+  /// (`missions/delegation.ts`) — null for a task that is purely a human
+  /// decision point (e.g. "review and decide") with no tool call at all.
+  toolName         String?
+  toolInput        Json?
+  /// Ids of `MissionTask` rows this task's readiness depends on — an array
+  /// column rather than a `MissionDependency` join table (Part 44's own
+  /// "do not duplicate" instruction, applied internally: a plain adjacency
+  /// list is sufficient for `missions/task-graph.ts`'s readiness computation
+  /// and needs no relational query a join table would add).
+  dependsOnTaskIds String[]
+  risk             MissionTaskRisk   @default(LOW)
+  approvalRequired Boolean           @default(false)
+  status           MissionTaskStatus @default(PENDING)
+  priority         String            @default("medium")
+  expectedResult   String?           @db.Text
+  actualResult     Json?
+  /// A concurrency guard key (e.g. "wordpress_post:123", Part 37) — two
+  /// `MissionTask`s (even across different missions) sharing a `resourceKey`
+  /// may not both be RUNNING at once (`missions/concurrency.ts`).
+  resourceKey      String?
+  attempt          Int               @default(0)
+  maxRetries       Int               @default(2)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  startedAt        DateTime?
+  finishedAt       DateTime?
+
+  mission        GrowthMission              @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  organization   Organization               @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  milestone      MissionMilestone?          @relation(fields: [milestoneId], references: [id], onDelete: SetNull)
+  actionRequests IntegrationActionRequest[]
+  tasks          Task[]
+
+  @@index([missionId, status])
+  @@index([organizationId])
+  @@index([resourceKey])
+  @@map("mission_tasks")
+}
+
+model MissionMetric {
+  id             String            @id @default(cuid())
+  missionId      String
+  organizationId String
+  key            String
+  label          String
+  kind           MissionMetricKind
+  unit           String?
+  currentValue   Float?
+  previousValue  Float?
+  targetValue    Float?
+  /// "up" | "down" | "flat" — derived from real points only (Part 9/10);
+  /// null when there is not yet enough history to say.
+  trend          String?
+  /// Which real system this measurement came from (e.g. "search_console",
+  /// "youtube_analytics", "manual") — never a synthesized figure.
+  source         String
+  measuredAt     DateTime          @default(now())
+  createdAt      DateTime          @default(now())
+
+  mission      GrowthMission @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([missionId, key, measuredAt])
+  @@map("mission_metrics")
+}
+
+/// Part 19's explicit Observation/Hypothesis/Learning/Decision distinction —
+/// deliberately its own table rather than folded into `OrgMemory` (Phase 7):
+/// `OrgMemory.value` is free prose for cross-turn goals/preferences, while a
+/// learning record is structured, mission-scoped, and evidence-linked. The
+/// two do not overlap in purpose.
+model MissionLearning {
+  id             String              @id @default(cuid())
+  missionId      String
+  organizationId String
+  type           MissionLearningType
+  title          String
+  detail         String              @db.Text
+  evidence       String[]
+  confidence     Float               @default(0.5)
+  relatedTaskId  String?
+  createdAt      DateTime            @default(now())
+
+  mission      GrowthMission @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([missionId, type, createdAt])
+  @@map("mission_learnings")
+}
+
+model MissionEvent {
+  id             String           @id @default(cuid())
+  missionId      String
+  organizationId String
+  type           MissionEventType
+  /// Always run through the same secret-scrubber as `AgentRunEvent.metadata`.
+  metadata       Json?
+  createdAt      DateTime         @default(now())
+
+  mission      GrowthMission @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([missionId, createdAt])
+  @@map("mission_events")
 }

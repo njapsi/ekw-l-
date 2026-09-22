@@ -16,6 +16,9 @@ import { type Db, prisma, requireMembership } from '@growth-agent/db';
 import { z } from 'zod';
 import { recordAudit } from '../audit/index.js';
 import { AppError } from '../errors.js';
+import { AUTOMATION_TASK_TYPES } from '../automation/schemas.js';
+
+export { AUTOMATION_TASK_TYPES };
 import type { CapabilityLevel, IntegrationKey } from '../integrations/contract.js';
 import { authorize } from '../rbac/authorize.js';
 
@@ -63,16 +66,6 @@ const IntegrationPolicy = z.object({
   delete: GatedMode,
 });
 export type IntegrationPolicy = z.infer<typeof IntegrationPolicy>;
-
-export const AUTOMATION_TASK_TYPES = [
-  'YOUTUBE_ANALYSIS',
-  'TIKTOK_ANALYSIS',
-  'WEBSITE_CRAWL',
-  'SEO_ISSUE_ALERT',
-  'MONETIZATION_SCAN',
-  'GROWTH_REPORT',
-  'CONTENT_OPPORTUNITY',
-] as const;
 
 /**
  * Third-party MCP tools carry more inherent uncertainty than our own native

@@ -30,6 +30,7 @@ import {
   resolveCapabilities,
 } from '../integrations/contract.js';
 import { createNotification } from '../notifications/index.js';
+import { onMissionActionDecided } from '../missions/approvals-bridge.js';
 import { scrubSecrets } from '../observability/scrub.js';
 import { tryVerifyAndResolveIssue } from '../seo/issue-resolution.js';
 import {
@@ -177,6 +178,10 @@ export interface RequestActionInput {
    *  transition then re-checks the live page and marks the issue FIXED if
    *  it no longer reproduces (see `decideActionRequest`). */
   sourceCrawlIssueId?: string | null;
+  /** Set when this action was proposed by a Growth Mission's execution loop
+   *  (Phase 10) — any decision on this request notifies the originating
+   *  `MissionTask` via `onMissionActionDecided`. */
+  sourceMissionTaskId?: string | null;
 }
 
 export async function requestIntegrationAction(input: RequestActionInput, db: Db = prisma) {
@@ -225,6 +230,7 @@ export async function requestIntegrationAction(input: RequestActionInput, db: Db
       requestedById: input.requestedById,
       expiresAt: new Date(Date.now() + ttlMs),
       sourceCrawlIssueId: input.sourceCrawlIssueId ?? null,
+      sourceMissionTaskId: input.sourceMissionTaskId ?? null,
     },
   });
 
@@ -326,6 +332,12 @@ export async function decideActionRequest(
       row.summary,
       db,
     );
+    if (row.sourceMissionTaskId) {
+      await onMissionActionDecided(
+        { organizationId: row.organizationId, missionTaskId: row.sourceMissionTaskId, outcome: 'REJECTED' },
+        db,
+      );
+    }
     return row;
   }
 
@@ -383,6 +395,17 @@ export async function decideActionRequest(
         db,
       );
     }
+    if (row.sourceMissionTaskId) {
+      await onMissionActionDecided(
+        {
+          organizationId: row.organizationId,
+          missionTaskId: row.sourceMissionTaskId,
+          outcome: 'EXECUTED',
+          result,
+        },
+        db,
+      );
+    }
   } catch (err) {
     const message = scrubSecrets(
       err instanceof AppError && err.expose
@@ -405,6 +428,12 @@ export async function decideActionRequest(
       metadata: { capabilityId: row.capabilityId, error: message },
     });
     await notifyRequester(row.organizationId, row.requestedById, row.id, 'failed', row.summary, db);
+    if (row.sourceMissionTaskId) {
+      await onMissionActionDecided(
+        { organizationId: row.organizationId, missionTaskId: row.sourceMissionTaskId, outcome: 'FAILED', error: message },
+        db,
+      );
+    }
   }
   return finalRow;
 }
@@ -424,14 +453,34 @@ export async function cancelActionRequest(
     data: { status: 'CANCELLED', decidedById: input.userId, decidedAt: new Date() },
   });
   if (res.count === 0) throw AppError.conflict('Only a pending request you made can be cancelled.');
+  const row = await db.integrationActionRequest.findFirst({
+    where: { id: input.requestId, organizationId: input.organizationId },
+  });
+  if (row?.sourceMissionTaskId) {
+    await onMissionActionDecided(
+      { organizationId: input.organizationId, missionTaskId: row.sourceMissionTaskId, outcome: 'CANCELLED' },
+      db,
+    );
+  }
 }
 
 /** Sweep: pending requests past their TTL become EXPIRED (never executed). */
 export async function expirePendingActions(now: Date = new Date(), db: Db = prisma) {
+  const expiring = await db.integrationActionRequest.findMany({
+    where: { status: 'PENDING', expiresAt: { lte: now }, sourceMissionTaskId: { not: null } },
+    select: { id: true, organizationId: true, sourceMissionTaskId: true },
+  });
   const res = await db.integrationActionRequest.updateMany({
     where: { status: 'PENDING', expiresAt: { lte: now } },
     data: { status: 'EXPIRED' },
   });
+  for (const row of expiring) {
+    if (!row.sourceMissionTaskId) continue;
+    await onMissionActionDecided(
+      { organizationId: row.organizationId, missionTaskId: row.sourceMissionTaskId, outcome: 'EXPIRED' },
+      db,
+    );
+  }
   return res.count;
 }
 
