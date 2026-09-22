@@ -34,6 +34,7 @@ import {
 } from './integration-tools.js';
 import { YOUTUBE_TOOLS, type YouTubeToolName } from './youtube-tools.js';
 import { TIKTOK_TOOLS, type TikTokToolName } from './tiktok-tools.js';
+import { WORDPRESS_TOOLS, type WordPressToolName } from './wordpress-tools.js';
 
 /** LOW → read-only or purely observational. MEDIUM → creates a pending,
  * human-approved request but commits nothing itself. HIGH/CRITICAL describe
@@ -298,10 +299,95 @@ const TIKTOK_METADATA: Record<TikTokToolName, Omit<AgentToolMetadata, 'name' | '
   },
 };
 
-/** The static catalogue — native + research + YouTube + TikTok tools,
- * identical for every organization. Never exposes a handler, only the
- * description of what exists (Part 57). Use `listOrgToolMetadata` for the
- * per-org catalogue that also includes enabled MCP tools. */
+/** Category/risk metadata for the WordPress Growth Agent tools (Phase 9,
+ * §20-21). Read/draft/analyze tools are LOW risk. The two proposal tools
+ * (`update.propose`/`publish.propose`) and the SEO-fix-proposal tool are
+ * MEDIUM risk, category ACTION, `requiresApproval: true` — every one of
+ * them only ever files a pending `IntegrationActionRequest`, never writes
+ * to WordPress directly, matching `integrations.propose_action`'s exact
+ * treatment. */
+const WORDPRESS_METADATA: Record<
+  WordPressToolName,
+  Omit<AgentToolMetadata, 'name' | 'description'>
+> = {
+  'wordpress.site.get': {
+    category: 'READ',
+    integration: 'WORDPRESS',
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTEGRATION',
+    organizationScoped: true,
+  },
+  'wordpress.post.list': {
+    category: 'READ',
+    integration: 'WORDPRESS',
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTEGRATION',
+    organizationScoped: true,
+  },
+  'wordpress.page.list': {
+    category: 'READ',
+    integration: 'WORDPRESS',
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTEGRATION',
+    organizationScoped: true,
+  },
+  'wordpress.content.draft': {
+    category: 'GENERATION',
+    integration: 'WORDPRESS',
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTEGRATION',
+    organizationScoped: true,
+  },
+  'wordpress.content.update.propose': {
+    category: 'ACTION',
+    integration: 'WORDPRESS',
+    riskLevel: 'MEDIUM',
+    requiresApproval: true,
+    providerType: 'INTEGRATION',
+    organizationScoped: true,
+  },
+  'wordpress.content.publish.propose': {
+    category: 'ACTION',
+    integration: 'WORDPRESS',
+    riskLevel: 'MEDIUM',
+    requiresApproval: true,
+    providerType: 'INTEGRATION',
+    organizationScoped: true,
+  },
+  'wordpress.content.refresh.analyze': {
+    category: 'ANALYSIS',
+    integration: 'WORDPRESS',
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTEGRATION',
+    organizationScoped: true,
+  },
+  'wordpress.seo.issue.fix.propose': {
+    category: 'ACTION',
+    integration: 'WORDPRESS',
+    riskLevel: 'MEDIUM',
+    requiresApproval: true,
+    providerType: 'INTEGRATION',
+    organizationScoped: true,
+  },
+  'wordpress.content.verify': {
+    category: 'ANALYSIS',
+    integration: 'WORDPRESS',
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTEGRATION',
+    organizationScoped: true,
+  },
+};
+
+/** The static catalogue — native + research + YouTube + TikTok + WordPress
+ * tools, identical for every organization. Never exposes a handler, only
+ * the description of what exists (Part 57). Use `listOrgToolMetadata` for
+ * the per-org catalogue that also includes enabled MCP tools. */
 export function listToolMetadata(): AgentToolMetadata[] {
   const native = Object.values(INTEGRATION_TOOLS).map((tool) => ({
     name: tool.name,
@@ -323,7 +409,12 @@ export function listToolMetadata(): AgentToolMetadata[] {
     description: tool.description,
     ...TIKTOK_METADATA[tool.name],
   }));
-  return [...native, ...research, ...youtube, ...tiktok];
+  const wordpress = Object.values(WORDPRESS_TOOLS).map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    ...WORDPRESS_METADATA[tool.name],
+  }));
+  return [...native, ...research, ...youtube, ...tiktok, ...wordpress];
 }
 
 /**

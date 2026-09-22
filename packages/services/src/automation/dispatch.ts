@@ -26,6 +26,8 @@ import {
 } from '../tiktok/monitoring.js';
 import { listWebsites, getCrawlOverview } from '../seo/read.js';
 import { startCrawl } from '../seo/jobs.js';
+import { findRefreshCandidates } from '../wordpress/content-refresh.js';
+import { listWordPressSites } from '../wordpress/read.js';
 import { AppError } from '../errors.js';
 import type { AutomationTaskTypeKey } from './schemas.js';
 
@@ -64,6 +66,8 @@ export async function dispatchTask(
       return runGrowthReport(ctx, db);
     case 'CONTENT_OPPORTUNITY':
       return runContentOpportunity(ctx, db);
+    case 'WORDPRESS_CONTENT_REFRESH':
+      return runWordPressContentRefresh(ctx, db);
     default: {
       const _x: never = taskType;
       throw new Error(`unknown automation task type ${String(_x)}`);
@@ -348,6 +352,42 @@ async function runContentOpportunity(ctx: DispatchContext, db: Db): Promise<Disp
   return {
     summary: `Opened a task for the biggest content opportunity: "${rec.title}".`,
     detail: { agentRunId: turn.agentRunId, taskId: task.id, conversationId: turn.conversationId },
+  };
+}
+
+async function runWordPressContentRefresh(ctx: DispatchContext, db: Db): Promise<DispatchResult> {
+  const sites = await listWordPressSites(ctx.organizationId, db);
+  if (sites.length === 0) throw new AppError('validation_failed', 'No WordPress site is connected.');
+  const configuredSiteId = typeof ctx.config.websiteId === 'string' ? ctx.config.websiteId : undefined;
+  const site = (configuredSiteId ? sites.find((s) => s.id === configuredSiteId) : sites[0]) ?? sites[0]!;
+
+  const candidates = await findRefreshCandidates(ctx.organizationId, { siteId: site.id, limit: 5 }, db);
+  const top = candidates[0];
+  if (!top || top.score === 0) {
+    return {
+      summary: 'No WordPress content currently stands out as a refresh candidate.',
+      detail: { siteId: site.id, candidateCount: candidates.length },
+    };
+  }
+
+  const task = await createTask(
+    {
+      organizationId: ctx.organizationId,
+      userId: ctx.ownerId,
+      title: `Refresh candidate: ${top.title}`,
+      description: top.evidence.join(' '),
+      instructions:
+        'Review this page\'s content and SEO issues, then decide whether to propose an update through the WordPress content tools. Nothing has been changed on WordPress.',
+      priority: top.score >= 0.65 ? 'high' : top.score >= 0.4 ? 'medium' : 'low',
+      domain: 'WORDPRESS',
+      affectedUrls: top.link ? [top.link] : [],
+      affectedRefs: [`wordpress_content:${top.wordPressContentId}`],
+    },
+    db,
+  );
+  return {
+    summary: `Opened a task for the top WordPress refresh candidate: "${top.title}".`,
+    detail: { siteId: site.id, taskId: task.id, candidateCount: candidates.length, score: top.score },
   };
 }
 

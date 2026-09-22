@@ -1398,6 +1398,57 @@ experiments,calendar,monitoring}.ts`), module-for-module mirrors of the
   paths (nor the pre-existing sync/publish paths they build on) were
   verified against a real account. See `docs/TIKTOK-GROWTH-AGENT.md`,
   `docs/PHASE-7-REPORT.md`, ADR-0057.
+- **WordPress Growth Agent** ✅ (operator's "Phase 9"): a named 18
+  -capability matrix (`wordpress/capability-matrix.ts`, distinguishing "no
+  scope granted" from "this deployment's client has no implementation for
+  this at all"); a content-refresh engine
+  (`wordpress/content-refresh.ts`, `findRefreshCandidates` — a documented
+  fixed-weight age/issues/thin-content score, never a fabricated traffic
+  signal); a hand-rolled, dependency-free content diff
+  (`wordpress/diff.ts`, three-tier word/paragraph/fallback after a real
+  live-reproduced O(n·m) performance bug — two 50k-token identical inputs
+  took 82.8s — was caught by this phase's own test and fixed); a **real
+  SEO→WordPress execution bridge**
+  (`wordpress/seo-bridge.ts`, `proposeContentFixForIssue` — matches a
+  `CrawlIssue` to synced WordPress content by URL and derives a
+  title/excerpt fix proposal **only from text already on the post**,
+  never fabricated, filed through the **existing** Phase 1 approval queue,
+  never a new write path); a version-safety concurrent-edit guard
+  (`UpdatePostPayload.expectedContentHash`, checked immediately before
+  `executeUpdatePost` writes); SEO-issue verification
+  (`seo/issue-resolution.ts`, `verifyAndResolveIssue` — re-fetches the
+  live page and flips `CrawlIssue.status` to `FIXED`/`REGRESSED` for 8
+  single-page-verifiable codes, wired as a best-effort inline hook inside
+  `approvals/index.ts`'s `decideActionRequest` rather than a new worker
+  job); and `agent/wordpress-tools.ts` — 9 tools dispatched through the
+  existing `executeAgentTool`, where every WRITE/PUBLISH-shaped tool only
+  ever files a pending approval, never writes directly. A new
+  `wordpress-growth` orchestrator capability (`agent/capabilities.ts`)
+  calls `executeAgentTool` exactly like `youtube-growth`/`tiktok-growth`;
+  `OrgContext` gained a `wordpress` connection field. `reports/facts.ts`'s
+  `gatherGrowth` counts WordPress as a fourth connected surface;
+  `automation/dispatch.ts` gained a `WORDPRESS_CONTENT_REFRESH` task type.
+  Migration `20260927120000_wordpress_growth_agent` is additive and the
+  smallest of any content-strategy-layer phase (0 new tables — one enum
+  value ×2, one nullable `IntegrationActionRequest.sourceCrawlIssueId` FK)
+  because WordPress's write/publish path already existed in the generic
+  approval queue, unlike TikTok's bespoke one. New `/app/wordpress`
+  workspace (Overview/Content/SEO — deliberately not the brief's full
+  10-section list, disclosed rather than dropped silently); Approvals are
+  **not** duplicated, reusing the existing `/app/integrations/approvals`
+  page per the brief's own instruction. **Audit finding, disclosed**: the
+  brief's named prerequisite "Phase 8 — SEO Growth Agent" does not exist
+  as such — the real "SEO" system is the earlier, structurally different
+  AI SEO Agent (crawler + rule-based auditor, no opportunities/
+  experiments/calendar layer of its own); the SEO bridge instead treats
+  real `CrawlIssue` rows as its evidence. Gates green: lint 14/14,
+  typecheck 14/14, **`packages/services` 1199 tests** (+38), web build,
+  tenant-scope clean. **Verification limit, disclosed**: no live
+  WordPress site or SEO crawl was exercised against real external data in
+  this sandbox — the same disclosed limitation as every WordPress
+  -touching phase since the original integration. See
+  `docs/WORDPRESS-GROWTH-AGENT.md`, `docs/WORDPRESS-INTEGRATION.md`
+  (§7), ADR-0058.
 - **Still outstanding:** Postgres **RLS** (ADR-0035, re-affirmed in
   ADR-0052 — application-layer scoping + the CI tenant-scope lint +
   integration tests, now actually running, remain the accepted mitigation);
@@ -1417,11 +1468,12 @@ experiments,calendar,monitoring}.ts`), module-for-module mirrors of the
   actual live `growth-agent` capability (the infrastructure and tests
   exist for both — see ADR-0054/ADR-0055, `docs/AGENT-RUNTIME.md` §6,
   `docs/MCP.md` — nothing in the live orchestrator path calls either yet;
-  **partially closed by Phase 6/ADR-0056 and Phase 7/ADR-0057** — the
-  Tool Executor and its Policy Engine are now the live dispatch path for
-  two capabilities, `youtube-growth` and `tiktok-growth`, calling
-  `youtube.*`/`tiktok.*` tools directly rather than via a model-driven
-  tool-calling loop; SEO and true agent-selected tool-calling are still
+  **partially closed by Phase 6/ADR-0056, Phase 7/ADR-0057, and Phase
+  9/ADR-0058** — the Tool Executor and its Policy Engine are now the live
+  dispatch path for three capabilities, `youtube-growth`, `tiktok-growth`,
+  and `wordpress-growth`, calling `youtube.*`/`tiktok.*`/`wordpress.*`
+  tools directly rather than via a model-driven tool-calling loop; SEO
+  (the AI SEO Agent) and true agent-selected tool-calling are still
   unwired); running `mcp/tenant-isolation.integration.test.ts`
   against a real database (written, typechecks, self-skips correctly, but
   unverified against Postgres — see the Phase 5 bullet above); connecting

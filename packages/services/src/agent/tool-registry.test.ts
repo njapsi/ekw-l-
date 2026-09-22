@@ -9,6 +9,7 @@ import { INTEGRATION_TOOL_NAMES } from './integration-tools.js';
 import { RESEARCH_TOOL_NAMES } from '../research/tools.js';
 import { YOUTUBE_TOOL_NAMES } from './youtube-tools.js';
 import { TIKTOK_TOOL_NAMES } from './tiktok-tools.js';
+import { WORDPRESS_TOOL_NAMES } from './wordpress-tools.js';
 
 vi.mock('../integrations/center.js', () => ({
   getConnectionCenter: vi.fn(async () => []),
@@ -21,7 +22,7 @@ vi.mock('../mcp/registry.js', () => ({
 }));
 
 describe('tool registry', () => {
-  it('lists metadata for exactly the closed native allowlist plus the research, YouTube, and TikTok tools, nothing more', () => {
+  it('lists metadata for exactly the closed native allowlist plus the research, YouTube, TikTok, and WordPress tools, nothing more', () => {
     const meta = listToolMetadata();
     expect(meta.map((m) => m.name).sort()).toEqual(
       [
@@ -29,6 +30,7 @@ describe('tool registry', () => {
         ...RESEARCH_TOOL_NAMES,
         ...YOUTUBE_TOOL_NAMES,
         ...TIKTOK_TOOL_NAMES,
+        ...WORDPRESS_TOOL_NAMES,
       ].sort(),
     );
     for (const m of meta) {

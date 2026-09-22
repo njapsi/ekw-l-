@@ -5,6 +5,15 @@ import { AppError } from '../errors.js';
 import { assertGovernanceAllows } from '../governance/index.js';
 import type { WordPressClientOptions, WpContentKind } from './client.js';
 import { clientForSite, explainWordPressError, requireWordPressSite } from './connect.js';
+import { contentHash } from './hash.js';
+
+/** `title`/`excerpt`/`content` come back as `{rendered?, raw?}` — `raw` is
+ *  populated because every call in this file authenticates with
+ *  `context=edit`. Falls back to `rendered` (HTML) so a hash can always be
+ *  computed even if `raw` were ever absent. */
+function fieldOf(f: { raw?: string; rendered?: string } | undefined): string {
+  return f?.raw ?? f?.rendered ?? '';
+}
 
 /**
  * WordPress write operations. Only `createDraft` runs directly: a draft is
@@ -36,6 +45,11 @@ export const UpdatePostPayload = z
       .trim()
       .regex(/^[a-z0-9-]{1,200}$/, 'Slug may only contain lowercase letters, digits and dashes.')
       .optional(),
+    /** Version-safety (Phase 9, §30): the content hash the proposal was
+     *  built against. If the live WordPress content no longer matches this
+     *  hash at execution time, the update is refused rather than silently
+     *  overwriting a change made elsewhere since the proposal was approved. */
+    expectedContentHash: z.string().length(64).optional(),
   })
   .refine((p) => p.title ?? p.content ?? p.excerpt ?? p.slug, {
     message: 'Nothing to change.',
@@ -141,7 +155,19 @@ export async function executeUpdatePost(ctx: Ctx, raw: unknown) {
     if (current.status === 'publish') {
       need(site.detectedCapabilities, editPublishedCap(payload.kind), 'edit published content');
     }
-    const { kind, wpId, ...fields } = payload;
+    const { kind, wpId, expectedContentHash, ...fields } = payload;
+    if (expectedContentHash) {
+      const liveHash = contentHash({
+        title: fieldOf(current.title),
+        excerpt: fieldOf(current.excerpt),
+        content: fieldOf(current.content),
+      });
+      if (liveHash !== expectedContentHash) {
+        throw AppError.conflict(
+          'This content changed on WordPress since the update was proposed. Review the current content and resubmit.',
+        );
+      }
+    }
     const updated = await client.updatePost(kind, wpId, fields);
     return { wpId: updated.id, status: updated.status, link: updated.link ?? null };
   } catch (err) {

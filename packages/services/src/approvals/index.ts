@@ -31,6 +31,7 @@ import {
 } from '../integrations/contract.js';
 import { createNotification } from '../notifications/index.js';
 import { scrubSecrets } from '../observability/scrub.js';
+import { tryVerifyAndResolveIssue } from '../seo/issue-resolution.js';
 import {
   actionClassForLevel,
   assertGovernanceAllows,
@@ -171,6 +172,11 @@ export interface RequestActionInput {
   connectionRef: string;
   payload: unknown;
   summary: string;
+  /** Set when this action was proposed to fix a specific SEO finding
+   *  (Phase 9's `wordpress/seo-bridge.ts`) — a successful EXECUTED
+   *  transition then re-checks the live page and marks the issue FIXED if
+   *  it no longer reproduces (see `decideActionRequest`). */
+  sourceCrawlIssueId?: string | null;
 }
 
 export async function requestIntegrationAction(input: RequestActionInput, db: Db = prisma) {
@@ -218,6 +224,7 @@ export async function requestIntegrationAction(input: RequestActionInput, db: Db
       source: input.source ?? 'USER',
       requestedById: input.requestedById,
       expiresAt: new Date(Date.now() + ttlMs),
+      sourceCrawlIssueId: input.sourceCrawlIssueId ?? null,
     },
   });
 
@@ -367,6 +374,15 @@ export async function decideActionRequest(
       row.summary,
       db,
     );
+    // §22/§32: an action proposed to fix an SEO finding gets verified
+    // against the live page right after it executes — best-effort, never
+    // lets a verification hiccup mask the real EXECUTED result above.
+    if (row.sourceCrawlIssueId) {
+      await tryVerifyAndResolveIssue(
+        { organizationId: row.organizationId, issueId: row.sourceCrawlIssueId, actorId: input.deciderId },
+        db,
+      );
+    }
   } catch (err) {
     const message = scrubSecrets(
       err instanceof AppError && err.expose

@@ -18,6 +18,7 @@ export const AUTOMATION_TASK_TYPES = [
   'MONETIZATION_SCAN',
   'GROWTH_REPORT',
   'CONTENT_OPPORTUNITY',
+  'WORDPRESS_CONTENT_REFRESH',
 ] as const;
 export type AutomationTaskTypeKey = (typeof AUTOMATION_TASK_TYPES)[number];
 
@@ -136,6 +137,16 @@ export const TASK_TYPE_META: Record<AutomationTaskTypeKey, TaskTypeMeta> = {
     externalPublish: false,
     configSchema: emptyConfig,
     example: 'Find my biggest content opportunity every Friday.',
+  },
+  WORDPRESS_CONTENT_REFRESH: {
+    key: 'WORDPRESS_CONTENT_REFRESH',
+    label: 'Find WordPress articles to refresh',
+    description:
+      'Analyzes your synced WordPress content against SEO issues and page age, and opens a task for the top refresh candidate. Never edits or publishes anything itself.',
+    requiredAction: 'agent:run',
+    externalPublish: false,
+    configSchema: websiteConfig,
+    example: 'Find WordPress articles to refresh every month.',
   },
 };
 

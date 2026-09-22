@@ -17,6 +17,7 @@ export const CAPABILITY_IDS = [
   'tiktok-analyst',
   'tiktok-growth',
   'seo-agent',
+  'wordpress-growth',
   'content-repurpose',
   'growth-plan',
 ] as const;

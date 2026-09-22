@@ -8,6 +8,8 @@ import * as monetization from '../monetization/read.js';
 import * as seoRead from '../seo/read.js';
 import * as tiktokRead from '../tiktok/read.js';
 import * as youtubeRead from '../youtube/read.js';
+import { listWordPressSites } from '../wordpress/read.js';
+import { findRefreshCandidates } from '../wordpress/content-refresh.js';
 import { listYouTubeOpportunities } from '../youtube/opportunities.js';
 import { listExperiments } from '../youtube/experiments.js';
 import { listTikTokOpportunities } from '../tiktok/opportunities.js';
@@ -567,12 +569,13 @@ async function gatherAiRecommendations(orgId: string, db: Db): Promise<GatheredR
 // --- Growth (cross-surface) --------------------------------------
 
 async function gatherGrowth(orgId: string, db: Db): Promise<GatheredReport> {
-  const [yt, tt, sites, dash, recRows] = await Promise.all([
+  const [yt, tt, sites, wpSites, dash, recRows] = await Promise.all([
     youtubeRead.getChannelOverview(orgId, db).catch(() => null),
     tiktokRead.getAccountOverview(orgId, db).catch(() => null),
     seoRead
       .listWebsites(orgId, db)
       .catch(() => [] as Awaited<ReturnType<typeof seoRead.listWebsites>>),
+    listWordPressSites(orgId, db).catch(() => [] as Awaited<ReturnType<typeof listWordPressSites>>),
     monetization.getMonetizationDashboard(orgId, db).catch(() => null),
     db.recommendation.findMany({
       where: { organizationId: orgId },
@@ -582,8 +585,9 @@ async function gatherGrowth(orgId: string, db: Db): Promise<GatheredReport> {
   ]);
   const fs = new FactSheet();
   const g = emptyGathered('your organization');
+  const wpConnected = wpSites.some((s) => s.status !== 'REVOKED');
   const connectedSurfaces =
-    (yt ? 1 : 0) + (tt ? 1 : 0) + (sites.some((s) => s.latestCrawl) ? 1 : 0);
+    (yt ? 1 : 0) + (tt ? 1 : 0) + (sites.some((s) => s.latestCrawl) ? 1 : 0) + (wpConnected ? 1 : 0);
   g.connected =
     connectedSurfaces > 0 || Boolean(dash && (dash.current.length || dash.potential.length));
   if (!g.connected) {
@@ -598,7 +602,7 @@ async function gatherGrowth(orgId: string, db: Db): Promise<GatheredReport> {
   const largestAudience = audiences.length ? Math.max(...audiences) : null;
 
   const metrics: MetricInput[] = [
-    metric('Connected surfaces', connectedSurfaces, `${connectedSurfaces} of 3`),
+    metric('Connected surfaces', connectedSurfaces, `${connectedSurfaces} of 4`),
     metric(
       'Largest audience',
       largestAudience,
@@ -606,6 +610,22 @@ async function gatherGrowth(orgId: string, db: Db): Promise<GatheredReport> {
     ),
     metric('Open recommendations', openRecs.length, fmtInt(openRecs.length)),
   ];
+  if (wpConnected) {
+    const wpSite = wpSites.find((s) => s.status !== 'REVOKED');
+    const refreshCandidates = wpSite
+      ? await findRefreshCandidates(orgId, { siteId: wpSite.id, limit: 5 }, db).catch(() => [])
+      : [];
+    const worthRefreshing = refreshCandidates.filter((c) => c.score > 0).length;
+    if (worthRefreshing > 0) {
+      metrics.push(metric('WordPress pages worth refreshing', worthRefreshing, fmtInt(worthRefreshing)));
+      g.opportunities.push({
+        id: 'wp-refresh',
+        title: `${worthRefreshing} WordPress page${worthRefreshing === 1 ? '' : 's'} worth refreshing`,
+        detail: `Identified from real age, word-count, and matched SEO-crawl-issue signals on ${wpSite?.siteUrl ?? 'the connected site'}.`,
+        effort: 'small',
+      });
+    }
+  }
   if (dash) {
     metrics.push(
       metric('Monetization: active', dash.current.length, fmtInt(dash.current.length)),
@@ -627,7 +647,7 @@ async function gatherGrowth(orgId: string, db: Db): Promise<GatheredReport> {
     );
   }
   fs.push(
-    `${connectedSurfaces} of 3 growth surfaces are connected (YouTube ${yt ? 'yes' : 'no'}, TikTok ${tt ? 'yes' : 'no'}, SEO crawl ${sites.some((s) => s.latestCrawl) ? 'yes' : 'no'}).`,
+    `${connectedSurfaces} of 4 growth surfaces are connected (YouTube ${yt ? 'yes' : 'no'}, TikTok ${tt ? 'yes' : 'no'}, SEO crawl ${sites.some((s) => s.latestCrawl) ? 'yes' : 'no'}, WordPress ${wpConnected ? 'yes' : 'no'}).`,
   );
   if (largestAudience != null)
     fs.push(`Largest connected audience is about ${fmtInt(largestAudience)}.`);

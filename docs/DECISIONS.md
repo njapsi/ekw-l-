@@ -6,6 +6,141 @@ reversal gets a new ADR that supersedes the old one.
 
 ---
 
+## ADR-0058 — WordPress Growth Agent: SEO becomes an execution target through the existing approval queue, not a new write path; a diff-performance bug found and fixed; "Phase 8 SEO Growth Agent" does not exist as claimed
+
+**Context.** Phase 9 asked for a production-grade "WordPress Growth Agent"
+spanning connection/auth/capability-detection through content
+intelligence, drafting, approval-gated updates/publishing, and — called
+"a critical architectural requirement" — using WordPress as the execution
+layer for the existing "Phase 8 SEO Growth Agent"'s findings. The
+audit-first step found two things that reshaped the plan before any code
+was written. First, WordPress's existing integration is **more mature
+than YouTube or TikTok were before their own extension phases**: real
+Application-Password auth, SSRF-safe pinned HTTP, real capability
+detection from the connected user's own granted capabilities, and — unlike
+TikTok's bespoke separate publish state machine (ADR-0017) — a
+write/publish path **already wired into the generic Phase 1 approval
+queue** (`approvals/index.ts`'s `EXECUTORS` registry already has
+`wordpress.create_draft`/`update_post`/`publish`). Second, the brief's
+named prerequisite, "Phase 8 — SEO Growth Agent," **does not exist as
+such** in the real codebase — what exists under "SEO" is the earlier,
+structurally different AI SEO Agent (crawler + rule-based auditor +
+recommendation engine + read-only agent tools), with no
+opportunities/experiments/calendar content-strategy layer of its own.
+
+**Decision.**
+
+1. **No new write/publish infrastructure.** Every WRITE/PUBLISH-shaped
+   surface this phase adds (`seo-bridge.ts`'s `proposeContentFixForIssue`,
+   the three ACTION-kind agent tools) terminates in
+   `approvals.requestIntegrationAction` against the capabilities that
+   already exist — never a new executor, never a direct write. This is
+   the direct consequence of finding #1 above: there was no write-path gap
+   to close, only a missing bridge from SEO evidence into the existing
+   queue.
+2. **The SEO→WordPress bridge treats real `CrawlIssue` rows as the SEO
+   evidence**, since no "Phase 8" content-strategy layer exists to bridge
+   from instead (finding #2). Only two issue-code families
+   (`MISSING_TITLE`/`TITLE_LENGTH`, `MISSING_META_DESCRIPTION`/
+   `META_DESCRIPTION_LENGTH`) are actionable, because only
+   `title`/`excerpt`/`content`/`slug` are writable on a WordPress post at
+   all — every other issue code is refused with an honest, specific
+   explanation rather than a generic failure. `buildFixProposal` is pure
+   and derives proposed text **only from content already present on the
+   post** (title, excerpt, or a plain-text extract of the body), returning
+   `null` rather than fabricating when there is nothing to derive from —
+   a dedicated test asserts the proposed text is always a
+   substring/derivation of real source text.
+3. **A version-safety guard (`expectedContentHash`) was added to
+   `UpdatePostPayload`** rather than a new schema/table: the hash of the
+   post's title/excerpt/content at proposal time travels inside the
+   existing `IntegrationActionRequest.payload` JSON and is re-checked
+   immediately before the write executes, refusing (`AppError.conflict`)
+   if the content changed on WordPress in the meantime — satisfying the
+   brief's "if an update fails, do not mark the action successful"
+   without new infrastructure.
+4. **SEO-issue verification runs synchronously, inline, inside the
+   existing `decideActionRequest`**, not as a new background worker job
+   (the brief's own §37 suggested `wordpress.action.verify`/
+   `wordpress.publish.verify` as job names). `tryVerifyAndResolveIssue` is
+   a best-effort, non-throwing wrapper fired only when the executed
+   request carries a `sourceCrawlIssueId` (a new nullable FK column on
+   `IntegrationActionRequest`, populated by the SEO bridge) — re-fetching
+   the live page and flipping the `CrawlIssue` to `FIXED`/`REGRESSED` as
+   the real HTTP re-check finds. This closes the brief's example flow
+   ("update WordPress → crawl page → verify change → mark SEO issue
+   resolved") with one inline hook instead of a new queue.
+5. **A real, live-reproduced performance bug was found and fixed in this
+   phase's own new code**, not inherited from elsewhere: the first
+   version of `diff.ts` (a hand-rolled word-level LCS diff for the content
+   -editor's Original/Proposed/Highlighted view) capped both inputs at
+   20,000 tokens before running an O(n·m) table; two identical
+   50,000-word-tokenized inputs (capped to a 400-million-cell table) took
+   **82.8 seconds** — caught by this phase's own test before shipping.
+   Fixed with a three-tier fallback (word-level LCS below 1,500 tokens →
+   paragraph-level LCS below 1,500 "paragraphs" → a trivial delete+insert
+   pair as a last resort), establishing a reusable pattern for any future
+   hand-rolled diff/comparison utility in this codebase.
+6. **The capability matrix reports 18 named capabilities**, distinguishing
+   "no WordPress-side scope granted" from "this deployment's client code
+   has no implementation for this operation at all" via two documented
+   reason constants — mirroring the YouTube/TikTok capability-matrix
+   precedent. Unlike `tiktok.publish`'s `REQUIRES_PROVIDER_APPROVAL`
+   baseline (ADR-0057, which never promotes to `AVAILABLE`),
+   `wordpress.publish`'s contract baseline is a plain `AVAILABLE`, so no
+   analogous `.usable`-bypass workaround was needed; a dedicated
+   `approvalGatedAvailability()` resolver instead explicitly encodes "a
+   WRITE/PUBLISH capability always reports `REQUIRES_PERMISSION` once the
+   scope is granted, never straight to `AVAILABLE`" (hard rule 4).
+7. **Several named models from the brief's own list were deliberately not
+   created**: `WordPressSyncRun`/`WordPressApiEvent` (the existing generic
+   `IntegrationSyncRun` + `IntegrationHealth` + audit log already cover
+   this across every provider); `WordPressCategory`/`WordPressTag` (no
+   taxonomy endpoint is implemented — a table with no real data source
+   would be schema noise or an invitation to fabricate); a separate
+   `WordPressAction` audit table (the existing `AuditLog` +
+   `IntegrationActionRequest` lifecycle already record every write
+   action's actor, capability, payload, approval, and result).
+
+**Alternatives considered.**
+
+- _Build a new `WORDPRESS`-domain write executor separate from the generic
+  approval queue, matching TikTok's bespoke publish state machine._
+  Rejected — WordPress's write path already lives in the same generic
+  queue every other write-capable integration uses; forking a second path
+  would fragment the approval system for no functional gain.
+- _Treat the brief's "Phase 8 SEO Growth Agent" as if it existed and build
+  against an assumed interface._ Rejected — this would either silently
+  invent a nonexistent system's shape or produce integration code that
+  doesn't compile against the real AI SEO Agent. The audit findings are
+  disclosed directly in `docs/WORDPRESS-GROWTH-AGENT.md` instead.
+- _A new `wordpress.action.verify` worker queue, per the brief's own
+  suggested job names._ Rejected for this pass — the synchronous inline
+  hook satisfies the same outcome (update → verify → audit) without new
+  queue infrastructure; revisiting this as a real scheduled re-verification
+  job (independent of a fresh write) is a reasonable future addition, not
+  a gap in this phase's scope.
+
+**Consequences.** WordPress is now wired through the Phase 4/5 Tool
+Registry/Policy Engine/Tool Executor exactly like YouTube and TikTok
+(`wordpress-growth`), leaving the AI SEO Agent as the one remaining domain
+not yet using this pattern. The migration for this phase is the smallest
+of any content-strategy-layer phase (0 new tables, one enum value ×2, one
+nullable FK column) because the write/publish infrastructure it needed
+already existed — a direct, positive consequence of the audit-first
+discipline this project's per-phase workflow requires. Two disclosed,
+pre-existing test-infrastructure gaps (the shared `memory-db.ts` harness
+lacks `crawl`/`crawlPage`/`crawlIssue` models; the `fake-wordpress.ts`
+`FakePost` fixture lacks a `content` field) limited how thoroughly
+`content-refresh.ts` and the full `proposeContentFixForIssue` I/O path
+could be exercised — both are noted as remediation candidates rather than
+fixed in this pass. No live WordPress site or SEO crawl was exercised
+against real external data in this sandbox — no such credentials exist
+here, the same disclosed limitation as every WordPress-touching phase
+since the original integration.
+
+---
+
 ## ADR-0057 — TikTok Growth Agent: the same content-strategy layer as YouTube, adapted for a mature vertical slice that already has real publishing, no daily analytics, and a structural capability-matrix bug this phase found and fixed
 
 **Context.** Phase 7 asked for a production-grade "TikTok Growth Agent"

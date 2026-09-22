@@ -108,3 +108,12 @@ per type, newest-modified first) into `WordPressContent`:
   are not supported. Jetpack-connected self-hosted sites work normally.
 - **One site per org.** One site per organization is shown in the UI. The
   data model supports several.
+
+## 7. The WordPress Growth Agent (Phase 9)
+
+The content-strategy layer built on top of this connector — a named
+capability matrix, a content-refresh engine, a real SEO→WordPress
+execution bridge, SEO-issue verification, and a dedicated agent-tool
+surface wired through the Phase 5 Tool Executor — is documented separately
+in `docs/WORDPRESS-GROWTH-AGENT.md`. Nothing in this document changed;
+Phase 9 only adds new modules on top of the connector described above.

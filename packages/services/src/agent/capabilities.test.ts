@@ -21,6 +21,7 @@ function orgContext(overrides: Partial<OrgContext> = {}): OrgContext {
     },
     tiktok: { connected: false, displayName: null, hasStats: false, lastSyncedAt: null },
     seo: { websites: 0, verifiedWebsites: 0, latestCrawl: null },
+    wordpress: { connected: false, siteUrl: null, lastSyncedAt: null },
     openTasks: 0,
     recentRecommendations: 0,
     ...overrides,

@@ -42,6 +42,10 @@ const PLAN_KEYWORDS: Array<{ id: CapabilityId; re: RegExp }> = [
   },
   { id: 'tiktok-analyst', re: /\btik ?tok\b/i },
   {
+    id: 'wordpress-growth',
+    re: /\b(wordpress|wp[-\s]?(post|page|site)|blog post|which articles?|refresh (my |the )?(content|article|post)|stale content|thin content)\b/i,
+  },
+  {
     id: 'seo-agent',
     re: /\b(seo|website|site|crawl|canonical|sitemap|robots\.txt|index(able|ing)?|orphan|structured data|schema\.org|which pages|analy[sz]e my (website|site))\b/i,
   },
@@ -63,6 +67,7 @@ export function keywordPlan(message: string, context: OrgContext): TurnPlan {
     if (context.seo.latestCrawl) hits.add('seo-agent');
     if (context.youtube.connected) hits.add('youtube-analyst');
     if (context.tiktok.connected) hits.add('tiktok-analyst');
+    if (context.wordpress.connected) hits.add('wordpress-growth');
   }
 
   const capabilities = [...hits].slice(0, 4);
@@ -78,6 +83,8 @@ export function keywordPlan(message: string, context: OrgContext): TurnPlan {
   if (hits.has('tiktok-growth') && !context.tiktok.connected)
     missing.push('Connect a TikTok account');
   if (hits.has('seo-agent') && !context.seo.latestCrawl) missing.push('Run a website crawl');
+  if (hits.has('wordpress-growth') && !context.wordpress.connected)
+    missing.push('Connect a WordPress site');
 
   return TurnPlan.parse({
     intent: message.slice(0, 160),
@@ -116,6 +123,7 @@ export async function planTurn(
       : input.context.seo.websites > 0
         ? 'seo(no crawl)'
         : null,
+    input.context.wordpress.connected ? 'wordpress' : null,
   ]
     .filter(Boolean)
     .join(', ');

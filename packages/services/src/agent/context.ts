@@ -35,13 +35,28 @@ export interface OrgContext {
       finishedAt: Date | null;
     } | null;
   };
+  wordpress: {
+    connected: boolean;
+    siteUrl: string | null;
+    lastSyncedAt: Date | null;
+  };
   openTasks: number;
   recentRecommendations: number;
 }
 
 export async function loadOrgContext(organizationId: string, db: Db = prisma): Promise<OrgContext> {
-  const [ytChannel, ytConn, ttAccount, ttConn, websites, latestCrawl, openTasks, recentRecs] =
-    await Promise.all([
+  const [
+    ytChannel,
+    ytConn,
+    ttAccount,
+    ttConn,
+    websites,
+    latestCrawl,
+    wpSite,
+    wpLastSync,
+    openTasks,
+    recentRecs,
+  ] = await Promise.all([
       db.youTubeChannel.findFirst({
         where: { organizationId },
         orderBy: { subscriberCount: 'desc' },
@@ -60,6 +75,14 @@ export async function loadOrgContext(organizationId: string, db: Db = prisma): P
         where: { organizationId, status: 'COMPLETED' },
         orderBy: { finishedAt: 'desc' },
         include: { website: true },
+      }),
+      db.wordPressSite.findFirst({
+        where: { organizationId },
+        orderBy: { createdAt: 'desc' },
+      }),
+      db.integrationSyncRun.findFirst({
+        where: { organizationId, integration: 'WORDPRESS', status: 'COMPLETED' },
+        orderBy: { finishedAt: 'desc' },
       }),
       db.task.count({
         where: { organizationId, status: { in: ['PENDING', 'IN_PROGRESS', 'BLOCKED'] } },
@@ -111,6 +134,11 @@ export async function loadOrgContext(organizationId: string, db: Db = prisma): P
           }
         : null,
     },
+    wordpress: {
+      connected: Boolean(wpSite && wpSite.status !== 'REVOKED'),
+      siteUrl: wpSite?.siteUrl ?? null,
+      lastSyncedAt: wpLastSync?.finishedAt ?? null,
+    },
     openTasks,
     recentRecommendations: recentRecs,
   };
@@ -132,6 +160,11 @@ export function summarizeOrgContext(ctx: OrgContext): string {
     ctx.seo.latestCrawl
       ? `SEO: ${ctx.seo.verifiedWebsites}/${ctx.seo.websites} verified website(s); latest crawl of ${ctx.seo.latestCrawl.hostname} — ${ctx.seo.latestCrawl.pagesCrawled} pages, ${ctx.seo.latestCrawl.issuesFound} issues, score ${ctx.seo.latestCrawl.overallScore ?? 'n/a'}/100.`
       : `SEO: ${ctx.seo.websites} website(s) registered, no completed crawl yet.`,
+  );
+  parts.push(
+    ctx.wordpress.connected
+      ? `WordPress connected: ${ctx.wordpress.siteUrl ?? 'site'}.`
+      : 'WordPress: not connected.',
   );
   parts.push(
     `${ctx.openTasks} open task(s); ${ctx.recentRecommendations} recommendation(s) in the last 30 days.`,

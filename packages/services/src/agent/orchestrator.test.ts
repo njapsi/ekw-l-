@@ -25,6 +25,8 @@ function fakeDb(opts: { existingConvoOrg?: string } = {}) {
     tikTokAccount: { findFirst: emptyFindFirst },
     website: { findMany: emptyFindMany },
     crawl: { findFirst: emptyFindFirst },
+    wordPressSite: { findFirst: emptyFindFirst },
+    integrationSyncRun: { findFirst: emptyFindFirst },
     youTubeMetric: { count: zeroCount },
     task: { count: zeroCount, findMany: emptyFindMany },
     recommendation: { count: zeroCount, findMany: emptyFindMany },

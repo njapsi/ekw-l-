@@ -28,6 +28,7 @@ function ctx(over: Partial<OrgContext> = {}): OrgContext {
         finishedAt: new Date(),
       },
     },
+    wordpress: { connected: false, siteUrl: null, lastSyncedAt: null },
     openTasks: 0,
     recentRecommendations: 0,
     ...over,

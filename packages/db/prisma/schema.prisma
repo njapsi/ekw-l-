@@ -802,6 +802,7 @@ enum RecommendationDomain {
   TIKTOK
   CONTENT
   GROWTH
+  WORDPRESS
 }
 
 enum RecommendationStatus {
@@ -1452,6 +1453,7 @@ model CrawlIssue {
   website      Website      @relation(fields: [websiteId], references: [id], onDelete: Cascade)
   page         CrawlPage?   @relation(fields: [pageId], references: [id], onDelete: SetNull)
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  actionRequests IntegrationActionRequest[]
 
   @@unique([crawlId, code, normalizedUrl])
   @@index([crawlId, category, severity])
@@ -2128,6 +2130,7 @@ enum AutomationTaskType {
   MONETIZATION_SCAN
   GROWTH_REPORT
   CONTENT_OPPORTUNITY
+  WORDPRESS_CONTENT_REFRESH
 }
 
 enum AutomationCadence {
@@ -2545,10 +2548,18 @@ model IntegrationActionRequest {
   expiresAt      DateTime
   createdAt      DateTime                @default(now())
   updatedAt      DateTime                @updatedAt
+  /// Set when this request was proposed to fix a specific SEO finding (Phase
+  /// 9's SEO→WordPress bridge, `wordpress/seo-bridge.ts`) — lets a successful
+  /// EXECUTED transition trigger `seo/issue-resolution.ts`'s single-page
+  /// re-check and, if the issue no longer reproduces, mark it FIXED. Null for
+  /// every action not proposed from an SEO finding.
+  sourceCrawlIssueId String?
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  sourceCrawlIssue   CrawlIssue?  @relation(fields: [sourceCrawlIssueId], references: [id], onDelete: SetNull)
 
   @@index([organizationId, status, createdAt])
+  @@index([sourceCrawlIssueId])
   @@map("integration_action_requests")
 }
 

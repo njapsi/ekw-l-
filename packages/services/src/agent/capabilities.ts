@@ -49,7 +49,7 @@ export interface CapabilityRecommendation {
   priority: 'critical' | 'high' | 'medium' | 'low';
   difficulty: 'trivial' | 'small' | 'medium' | 'large';
   confidence: number;
-  domain: 'SEO' | 'YOUTUBE' | 'TIKTOK' | 'CONTENT' | 'GROWTH';
+  domain: 'SEO' | 'YOUTUBE' | 'TIKTOK' | 'CONTENT' | 'GROWTH' | 'WORDPRESS';
   affectedUrls: string[];
   affectedRefs: string[];
 }
@@ -121,6 +121,11 @@ const orgContextCapability: Capability = {
           ctx.orgContext.seo.latestCrawl
             ? `Latest SEO crawl: ${ctx.orgContext.seo.latestCrawl.hostname} — ${ctx.orgContext.seo.latestCrawl.pagesCrawled} pages, ${ctx.orgContext.seo.latestCrawl.issuesFound} issues, score ${ctx.orgContext.seo.latestCrawl.overallScore ?? 'n/a'}/100.`
             : `${ctx.orgContext.seo.websites} website(s) registered; no completed crawl yet.`,
+        ),
+        fact(
+          ctx.orgContext.wordpress.connected
+            ? `WordPress connected: ${ctx.orgContext.wordpress.siteUrl ?? 'site'}.`
+            : 'WordPress is not connected.',
         ),
         ...connections.map((c) => fact(`Connection status — ${c}`)),
       ],
@@ -501,6 +506,122 @@ const youtubeGrowthCapability: Capability = {
         opportunities.length > 0
           ? `${opportunities.length} content opportunit${opportunities.length === 1 ? 'y' : 'ies'} identified from this channel's own performance history, ranked by priority score.`
           : 'No content opportunities identified yet from the currently synced videos.',
+      evidence,
+      recommendations: recs,
+    };
+  },
+};
+
+// --- wordpress-growth ------------------------------------------------
+
+/**
+ * The WordPress content capability (Phase 9), dispatched through the Phase
+ * 4/5 Tool Registry/Policy Engine/Tool Executor exactly like
+ * `youtube-growth`/`tiktok-growth` — the brief's own explicit mandate not
+ * to bypass that architecture. This is also where "WordPress becomes an
+ * execution layer for SEO" (Phase 9, §22) surfaces in the AI Copilot: when
+ * both WordPress and an SEO crawl are connected, refresh candidates are
+ * cross-referenced with real crawl issues (already computed by
+ * `findRefreshCandidates` — nothing new is invented here).
+ */
+const wordpressGrowthCapability: Capability = {
+  id: 'wordpress-growth',
+  title: 'WordPress content refresh & SEO execution',
+  description:
+    'Which synced WordPress pages are worth refreshing first — using real age, word-count, and matched SEO-crawl-issue signals — and how to route an SEO fix to WordPress for approval.',
+  keywords: [
+    'wordpress',
+    'wp',
+    'blog post',
+    'article',
+    'refresh',
+    'update my site',
+    'update the post',
+    'stale content',
+    'thin content',
+    'cms',
+  ],
+  async run(ctx) {
+    if (!ctx.orgContext.wordpress.connected) {
+      return needsPrereq(
+        'wordpress-growth',
+        'WordPress content analysis',
+        'Connect a WordPress site from /app/integrations/wordpress and run a sync.',
+      );
+    }
+    const toolCtx = {
+      organizationId: ctx.organizationId,
+      userId: ctx.userId,
+      db: ctx.db,
+      agentRunId: ctx.agentRunId,
+    };
+    const refreshEnv = await executeAgentTool(toolCtx, 'wordpress.content.refresh.analyze', {
+      limit: 20,
+    });
+
+    if (refreshEnv.status !== 'SUCCESS') {
+      return needsPrereq(
+        'wordpress-growth',
+        'WordPress content analysis',
+        refreshEnv.error?.message ?? 'No WordPress content is synced yet to analyze.',
+      );
+    }
+
+    const candidates =
+      (refreshEnv.data as { candidates: Array<Record<string, unknown>> } | undefined)
+        ?.candidates ?? [];
+
+    const withIssues = candidates.filter((c) => Number(c.issueCount ?? 0) > 0).length;
+
+    const evidence = [
+      metric(
+        `${candidates.length} published WordPress page(s) evaluated for refresh; ${withIssues} have at least one matched SEO crawl issue.`,
+      ),
+      ...candidates
+        .slice(0, 3)
+        .map((c) =>
+          rec(
+            `"${typeof c.title === 'string' ? c.title : 'Untitled'}": ${(c.evidence as string[] | undefined)?.join(' ') ?? ''}`,
+          ),
+        ),
+    ];
+
+    const recs: CapabilityRecommendation[] = candidates
+      .filter((c) => Number(c.score ?? 0) > 0)
+      .slice(0, 6)
+      .map((c) => {
+        const title = typeof c.title === 'string' ? c.title : 'Untitled';
+        const link = typeof c.link === 'string' ? c.link : null;
+        const contentId = typeof c.wordPressContentId === 'string' ? c.wordPressContentId : '';
+        return {
+          title: `Refresh "${title.slice(0, 70)}"`,
+          problem:
+            (c.evidence as string[] | undefined)?.join(' ') ?? 'This page may be due for a refresh.',
+          whyItMatters:
+            'Stale or thin content with unresolved SEO issues is less likely to rank or convert well.',
+          howToFix:
+            Number(c.issueCount ?? 0) > 0
+              ? 'Review the matched SEO issue(s) and use the WordPress content-fix proposal to file an approval-gated update.'
+              : 'Review the page in /app/wordpress and consider expanding or updating it.',
+          expectedBenefit:
+            'A better-maintained, more complete page. Not a guarantee of improved ranking or traffic.',
+          priority:
+            Number(c.score ?? 0) >= 0.65 ? 'high' : Number(c.score ?? 0) >= 0.4 ? 'medium' : 'low',
+          difficulty: 'small' as const,
+          confidence: c.confidence === 'HIGH' ? 0.85 : c.confidence === 'MEDIUM' ? 0.6 : 0.35,
+          domain: 'WORDPRESS' as const,
+          affectedUrls: link ? [link] : [],
+          affectedRefs: contentId ? [contentId] : [],
+        };
+      });
+
+    return {
+      capabilityId: 'wordpress-growth',
+      status: 'ok',
+      summary:
+        candidates.length > 0
+          ? `${candidates.length} synced WordPress page(s) evaluated; ${recs.length} are worth prioritizing for a refresh.`
+          : 'No published WordPress content is synced yet to evaluate.',
       evidence,
       recommendations: recs,
     };
@@ -959,6 +1080,7 @@ export const CAPABILITIES: Capability[] = [
   tiktokAnalystCapability,
   tiktokGrowthCapability,
   seoAgentCapability,
+  wordpressGrowthCapability,
   contentRepurposeCapability,
   growthPlanCapability,
 ];

@@ -50,7 +50,7 @@ export const APP_NAV_GROUPS: NavGroup[] = [
       { href: '/app/youtube', label: 'YouTube', icon: Youtube },
       { href: '/app/tiktok', label: 'TikTok', icon: Music2 },
       { href: '/app/seo', label: 'SEO', icon: Gauge },
-      { href: '/app/integrations/wordpress', label: 'WordPress', icon: PenSquare },
+      { href: '/app/wordpress', label: 'WordPress', icon: PenSquare },
       { href: '/app/monetization', label: 'Monetization', icon: DollarSign },
     ],
   },

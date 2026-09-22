@@ -18,3 +18,4 @@ export * from './tool-envelope.js';
 export * from './tool-executor.js';
 export * from './youtube-tools.js';
 export * from './tiktok-tools.js';
+export * from './wordpress-tools.js';

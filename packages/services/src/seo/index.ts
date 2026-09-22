@@ -28,3 +28,4 @@ export * from './agent-schema.js';
 export * from './agent.js';
 export * from './read.js';
 export * from './jobs.js';
+export * from './issue-resolution.js';
