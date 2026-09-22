@@ -97,6 +97,150 @@ export async function runTikTokAnalystAction(): Promise<ActionResult> {
   }
 }
 
+export async function regenerateTikTokOpportunitiesAction(): Promise<ActionResult> {
+  try {
+    const { org } = await requirePermission('agent:run');
+    const account = await tiktok.getPrimaryAccount(org.id);
+    if (!account) return { ok: false, error: 'Sync an account first.' };
+    const videos = await tiktok.listVideosPage(org.id, { limit: 50, sort: 'recent' });
+    const rows = videos.videos.map((v) => ({
+      videoId: v.videoId,
+      caption: v.caption,
+      createTime: v.createTime,
+      durationSec: v.durationSec,
+      viewCount: v.viewCount ? BigInt(v.viewCount) : null,
+      likeCount: v.likeCount ? BigInt(v.likeCount) : null,
+      commentCount: v.commentCount ? BigInt(v.commentCount) : null,
+      shareCount: v.shareCount ? BigInt(v.shareCount) : null,
+      hashtags: v.hashtags,
+    }));
+    const drafts = tiktok.buildOpportunityDrafts(rows);
+    const written = await tiktok.upsertOpportunities({
+      organizationId: org.id,
+      tikTokAccountId: account.id,
+      drafts,
+    });
+    revalidatePath('/app/tiktok/opportunities');
+    return {
+      ok: true,
+      message:
+        written > 0
+          ? `${written} content opportunit${written === 1 ? 'y' : 'ies'} identified.`
+          : 'No new content opportunities from the currently synced videos.',
+    };
+  } catch (e) {
+    return toError(e);
+  }
+}
+
+export async function promoteTikTokOpportunityAction(opportunityId: string): Promise<ActionResult> {
+  try {
+    const { org, user } = await requirePermission('agent:run');
+    await tiktok.promoteTikTokOpportunityToTask({
+      organizationId: org.id,
+      userId: user.id,
+      opportunityId,
+    });
+    revalidatePath('/app/tiktok/opportunities');
+    revalidatePath('/app/tasks');
+    return { ok: true, message: 'Added to Tasks.' };
+  } catch (e) {
+    return toError(e);
+  }
+}
+
+export async function dismissTikTokOpportunityAction(opportunityId: string): Promise<ActionResult> {
+  try {
+    const { org, user } = await requirePermission('agent:run');
+    await tiktok.updateTikTokOpportunityStatus({
+      organizationId: org.id,
+      userId: user.id,
+      opportunityId,
+      status: 'DISMISSED',
+    });
+    revalidatePath('/app/tiktok/opportunities');
+    return { ok: true, message: 'Dismissed.' };
+  } catch (e) {
+    return toError(e);
+  }
+}
+
+export async function generateTikTokContentPlanAction(
+  cadencePerWeek: number,
+  weeks: number,
+): Promise<ActionResult> {
+  try {
+    const { org, user } = await requirePermission('agent:run');
+    const account = await tiktok.getPrimaryAccount(org.id);
+    if (!account) return { ok: false, error: 'Sync an account first.' };
+    const opportunities = await tiktok.listTikTokOpportunities(org.id, { status: 'SUGGESTED' });
+    const drafts = tiktok.generateContentPlanDrafts({
+      opportunities: opportunities.map((o) => ({
+        type: o.type,
+        title: o.title,
+        description: o.description,
+        evidence: o.evidence as never,
+        factors: {
+          evidenceStrength: o.evidenceStrength,
+          historicalPerformance: o.historicalPerformance,
+          contentGap: o.contentGap,
+          executionFeasibility: o.executionFeasibility,
+        },
+        priorityScore: o.priorityScore,
+        confidence: o.confidence as 'HIGH' | 'MEDIUM' | 'LOW',
+        recommendedActions: o.recommendedActions,
+        relatedVideoIds: o.relatedVideoIds,
+      })),
+      cadencePerWeek,
+      weeks,
+      startDate: new Date(),
+    });
+    await tiktok.saveContentPlanEntries({
+      organizationId: org.id,
+      tikTokAccountId: account.id,
+      userId: user.id,
+      drafts,
+    });
+    revalidatePath('/app/tiktok/calendar');
+    return { ok: true, message: `${drafts.length} content-plan slot(s) planned.` };
+  } catch (e) {
+    return toError(e);
+  }
+}
+
+export async function createTikTokExperimentAction(input: {
+  hypothesis: string;
+  variable: string;
+  successMetric: string;
+  expectedDirection: 'INCREASE' | 'DECREASE';
+  experimentNote: string;
+}): Promise<ActionResult> {
+  try {
+    const { org, user } = await requirePermission('agent:run');
+    const account = await tiktok.getPrimaryAccount(org.id);
+    if (!account) return { ok: false, error: 'Sync an account first.' };
+    if (!input.hypothesis.trim() || !input.variable.trim() || !input.successMetric.trim()) {
+      return { ok: false, error: 'Hypothesis, variable, and success metric are required.' };
+    }
+    await tiktok.createExperiment({
+      organizationId: org.id,
+      tikTokAccountId: account.id,
+      userId: user.id,
+      hypothesis: input.hypothesis,
+      variable: input.variable,
+      baseline: {},
+      experimentNote: input.experimentNote,
+      successMetric: input.successMetric,
+      expectedDirection: input.expectedDirection,
+      startDate: new Date(),
+    });
+    revalidatePath('/app/tiktok/experiments');
+    return { ok: true, message: 'Experiment created.' };
+  } catch (e) {
+    return toError(e);
+  }
+}
+
 // --- Publishing ---------------------------------------------------------
 
 export interface DraftInput {

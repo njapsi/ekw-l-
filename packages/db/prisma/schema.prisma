@@ -179,6 +179,9 @@ model Organization {
   tikTokMetrics             TikTokMetric[]
   tikTokSyncRuns            TikTokSyncRun[]
   tikTokPublishes           TikTokPublish[]
+  tikTokOpportunities       TikTokOpportunity[]
+  tikTokExperiments         TikTokExperiment[]
+  tikTokContentPlans        TikTokContentPlan[]
   agentRuns                 AgentRun[]
   recommendations           Recommendation[]
   contentIdeas              ContentIdea[]
@@ -875,9 +878,10 @@ model ContentIdea {
   createdByAgentRunId String?
   createdAt           DateTime          @default(now())
 
-  organization    Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  createdByRun    AgentRun?              @relation(fields: [createdByAgentRunId], references: [id], onDelete: SetNull)
-  calendarEntries YouTubeCalendarEntry[]
+  organization       Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdByRun       AgentRun?              @relation(fields: [createdByAgentRunId], references: [id], onDelete: SetNull)
+  calendarEntries    YouTubeCalendarEntry[]
+  tikTokContentPlans TikTokContentPlan[]
 
   @@index([organizationId, platform, status])
   @@map("content_ideas")
@@ -914,6 +918,9 @@ model TikTokAccount {
   videos       TikTokVideo[]
   syncRuns     TikTokSyncRun[]
   publishes    TikTokPublish[]
+  opportunities TikTokOpportunity[]
+  experiments   TikTokExperiment[]
+  contentPlans  TikTokContentPlan[]
 
   @@unique([organizationId, openId])
   @@index([oauthConnectionId])
@@ -1043,6 +1050,152 @@ model TikTokPublish {
   @@index([organizationId, status])
   @@index([tikTokAccountId, contentHash])
   @@map("tiktok_publishes")
+}
+
+// ===========================================================================
+// Phase 7 — TikTok Growth Agent (content-strategy layer, mirrors the
+// YouTube Growth Agent models above)
+// ===========================================================================
+
+enum TikTokOpportunityType {
+  CONTENT_EXPANSION
+  UNDEREXPLOITED_TOPIC
+  HIGH_PERFORMER_FOLLOWUP
+  SHORT_FORMAT_OPPORTUNITY
+  EXTENDED_FORMAT_OPPORTUNITY
+  AUDIENCE_OPPORTUNITY
+  TREND_OPPORTUNITY
+}
+
+/// One identified content opportunity for a TikTok account. `priorityScore`
+/// is a documented composite (`tiktok/opportunities.ts`), never a "viral"
+/// prediction.
+model TikTokOpportunity {
+  id                    String                @id @default(cuid())
+  organizationId        String
+  tikTokAccountId       String
+  type                  TikTokOpportunityType
+  title                 String
+  description           String                @db.Text
+  status                OpportunityStatus     @default(SUGGESTED)
+  /// [{ statement, kind: fact|calculated_metric|assumption }]
+  evidence              Json                  @default("[]")
+  /// Named, documented factors in [0,1] — see tiktok/opportunities.ts.
+  evidenceStrength      Float
+  historicalPerformance Float
+  contentGap            Float
+  executionFeasibility  Float
+  priorityScore         Float
+  confidence            String // HIGH | MEDIUM | LOW — never a bare number
+  recommendedActions    String[]
+  relatedVideoIds       String[]
+  sourceAgentRunId      String?
+  dismissedReason       String?
+  createdAt             DateTime              @default(now())
+  updatedAt             DateTime              @updatedAt
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  account      TikTokAccount @relation(fields: [tikTokAccountId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, status, priorityScore])
+  @@index([tikTokAccountId])
+  @@map("tiktok_opportunities")
+}
+
+enum TikTokExperimentStatus {
+  PLANNED
+  RUNNING
+  COMPLETED
+  CANCELLED
+}
+
+enum TikTokExperimentDirection {
+  INCREASE
+  DECREASE
+}
+
+enum TikTokExperimentConclusion {
+  SUPPORTED
+  NOT_SUPPORTED
+  INCONCLUSIVE
+}
+
+/// A controlled test, never a forced "winner". `conclusion` is only ever set
+/// by `tiktok/experiments.ts`'s deterministic comparison — never asserted by
+/// a model.
+model TikTokExperiment {
+  id                String                       @id @default(cuid())
+  organizationId    String
+  tikTokAccountId   String
+  hypothesis        String                       @db.Text
+  variable          String
+  baseline          Json
+  experimentNote    String                       @db.Text
+  successMetric     String
+  expectedDirection TikTokExperimentDirection
+  status            TikTokExperimentStatus       @default(PLANNED)
+  startDate         DateTime                     @db.Date
+  endDate           DateTime?                    @db.Date
+  result            Json?
+  conclusion        TikTokExperimentConclusion?
+  confidence        String?
+  createdById       String?
+  createdAt         DateTime                     @default(now())
+  updatedAt         DateTime                     @updatedAt
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  account      TikTokAccount @relation(fields: [tikTokAccountId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, status])
+  @@index([tikTokAccountId])
+  @@map("tiktok_experiments")
+}
+
+/// Pipeline states, distinct from `ContentAssetVersion.status` because a
+/// content-plan entry tracks a broader lifecycle than one generated asset.
+enum TikTokContentPlanStatus {
+  IDEA
+  PLANNED
+  BRIEFED
+  SCRIPTED
+  DRAFT
+  READY
+  APPROVAL_REQUIRED
+  SCHEDULED
+  PUBLISHED
+  ANALYZING
+  COMPLETED
+  CANCELLED
+}
+
+/// One planned piece of content. `contentIdeaId` links back to the shared
+/// `ContentIdea` row when the entry came from the idea/opportunity pipeline;
+/// null for a manually added slot. `status: PUBLISHED` is a status marker
+/// set by the user, never implied by the real `TikTokPublish` flow — the two
+/// are deliberately independent (see `docs/TIKTOK-GROWTH-AGENT.md`).
+model TikTokContentPlan {
+  id                  String                  @id @default(cuid())
+  organizationId      String
+  tikTokAccountId     String
+  contentIdeaId       String?
+  scheduledDate       DateTime                @db.Date
+  title               String
+  format              String // "short" (<=60s) | "extended" (>60s)
+  status              TikTokContentPlanStatus @default(IDEA)
+  rationale           String                  @db.Text
+  sourceOpportunityId String?
+  notes               String?                 @db.Text
+  createdById         String?
+  createdAt           DateTime                @default(now())
+  updatedAt           DateTime                @updatedAt
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  account      TikTokAccount @relation(fields: [tikTokAccountId], references: [id], onDelete: Cascade)
+  contentIdea  ContentIdea?  @relation(fields: [contentIdeaId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, scheduledDate])
+  @@index([tikTokAccountId])
+  @@map("tiktok_content_plans")
 }
 
 // ===========================================================================

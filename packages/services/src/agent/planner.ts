@@ -36,6 +36,10 @@ const PLAN_KEYWORDS: Array<{ id: CapabilityId; re: RegExp }> = [
     id: 'youtube-analyst',
     re: /\b(youtube|channel|subscribers?|watch time|thumbnail|remake|momentum|(post|publish).{0,12}(this )?week|which .*videos?)\b/i,
   },
+  {
+    id: 'tiktok-growth',
+    re: /\b(content opportunit(y|ies)|content idea|content pattern|content calendar|what should i (post|make)|benchmark|outperform|underperform|compare (my |these )?videos?|run an experiment|a\/b test|hashtag)\b/i,
+  },
   { id: 'tiktok-analyst', re: /\btik ?tok\b/i },
   {
     id: 'seo-agent',
@@ -70,6 +74,8 @@ export function keywordPlan(message: string, context: OrgContext): TurnPlan {
   if (hits.has('youtube-growth') && !context.youtube.connected)
     missing.push('Connect a YouTube channel');
   if (hits.has('tiktok-analyst') && !context.tiktok.connected)
+    missing.push('Connect a TikTok account');
+  if (hits.has('tiktok-growth') && !context.tiktok.connected)
     missing.push('Connect a TikTok account');
   if (hits.has('seo-agent') && !context.seo.latestCrawl) missing.push('Run a website crawl');
 

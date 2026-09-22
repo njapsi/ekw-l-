@@ -4,6 +4,12 @@ Status: **implemented (Phase 4)**. Official TikTok developer APIs only — no
 scraping, no circumvention of API restrictions, no access to private or
 unauthorized data.
 
+The content-strategy layer built on top of this integration (benchmarking,
+content patterns, an opportunity engine, a content plan, experiments,
+anomaly monitoring, and the new agent tools) is documented separately in
+`docs/TIKTOK-GROWTH-AGENT.md` (operator's "Phase 7") — this file covers the
+OAuth/sync/analyst/publishing foundation only, unchanged by that phase.
+
 ## 1. Auth (Login Kit / OAuth 2.0 v2)
 
 - **Endpoints:** authorize at `https://www.tiktok.com/v2/auth/authorize/`, token

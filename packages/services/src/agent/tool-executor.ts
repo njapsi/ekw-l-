@@ -36,6 +36,7 @@ import {
 import type { ToolPolicyOutcome } from './policy-engine.js';
 import { RESEARCH_TOOL_NAMES, runResearchTool } from '../research/tools.js';
 import { YOUTUBE_TOOL_NAMES, runYouTubeTool } from './youtube-tools.js';
+import { TIKTOK_TOOL_NAMES, runTikTokTool } from './tiktok-tools.js';
 import { executeMcpTool } from '../mcp/execute.js';
 import { blockedFromPolicy, failed, success, type ToolResultEnvelope } from './tool-envelope.js';
 
@@ -50,11 +51,13 @@ export interface ToolExecutionContext {
 const NATIVE_NAMES = new Set<string>(INTEGRATION_TOOL_NAMES);
 const RESEARCH_NAMES = new Set<string>(RESEARCH_TOOL_NAMES);
 const YOUTUBE_NAMES = new Set<string>(YOUTUBE_TOOL_NAMES);
+const TIKTOK_NAMES = new Set<string>(TIKTOK_TOOL_NAMES);
 
-function kindOf(name: string): 'native' | 'research' | 'youtube' | 'mcp' | 'unknown' {
+function kindOf(name: string): 'native' | 'research' | 'youtube' | 'tiktok' | 'mcp' | 'unknown' {
   if (NATIVE_NAMES.has(name)) return 'native';
   if (RESEARCH_NAMES.has(name)) return 'research';
   if (YOUTUBE_NAMES.has(name)) return 'youtube';
+  if (TIKTOK_NAMES.has(name)) return 'tiktok';
   if (name.startsWith('mcp.')) return 'mcp';
   return 'unknown';
 }
@@ -212,6 +215,13 @@ export async function executeAgentTool(
         db,
       };
       data = await runYouTubeTool(toolName, youtubeCtx, rawInput);
+    } else if (kind === 'tiktok') {
+      const tiktokCtx: IntegrationToolContext = {
+        organizationId: ctx.organizationId,
+        userId: ctx.userId,
+        db,
+      };
+      data = await runTikTokTool(toolName, tiktokCtx, rawInput);
     } else {
       envelope = await executeMcpTool(
         ctx.organizationId,

@@ -15,6 +15,7 @@ export const CAPABILITY_IDS = [
   'youtube-monetization',
   'youtube-growth',
   'tiktok-analyst',
+  'tiktok-growth',
   'seo-agent',
   'content-repurpose',
   'growth-plan',

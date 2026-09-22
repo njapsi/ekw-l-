@@ -9,6 +9,8 @@ const TABS = [
   ['/app/tiktok/videos', 'Video library'],
   ['/app/tiktok/performance', 'Performance'],
   ['/app/tiktok/opportunities', 'Content opportunities'],
+  ['/app/tiktok/calendar', 'Calendar'],
+  ['/app/tiktok/experiments', 'Experiments'],
   ['/app/tiktok/recommendations', 'Recommendations'],
   ['/app/tiktok/publishing', 'Publishing'],
 ] as const;

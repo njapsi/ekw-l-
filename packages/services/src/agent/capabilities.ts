@@ -586,6 +586,131 @@ const tiktokAnalystCapability: Capability = {
   },
 };
 
+// --- tiktok-growth ------------------------------------------------
+
+/**
+ * The one TikTok capability that dispatches through Phase 4/5's Tool
+ * Registry/Policy Engine/Tool Executor (`executeAgentTool`) rather than
+ * calling a `tiktok/*` function directly — Phase 7's mandate to route new
+ * TikTok functionality through the existing architecture instead of
+ * bypassing it, mirroring `youtube-growth` exactly. `tiktok-analyst` above
+ * is untouched — this is new surface area, not a replacement.
+ */
+const tiktokGrowthCapability: Capability = {
+  id: 'tiktok-growth',
+  title: 'TikTok content opportunities & patterns',
+  description:
+    "Benchmarks recent TikTok videos against the account's own history, detects content patterns, and surfaces evidence-backed content opportunities with a documented priority score.",
+  keywords: [
+    'opportunity',
+    'opportunities',
+    'content idea',
+    'content pattern',
+    'content calendar',
+    'benchmark',
+    'outperform',
+    'underperform',
+    'compare videos',
+    'what should i post',
+    'experiment',
+    'hashtag',
+  ],
+  async run(ctx) {
+    if (!ctx.orgContext.tiktok.connected) {
+      return needsPrereq(
+        'tiktok-growth',
+        'TikTok content opportunities',
+        'Connect a TikTok account from /app/integrations/tiktok and run a sync.',
+      );
+    }
+    const toolCtx = {
+      organizationId: ctx.organizationId,
+      userId: ctx.userId,
+      db: ctx.db,
+      agentRunId: ctx.agentRunId,
+    };
+    const [performanceEnv, patternsEnv, opportunitiesEnv] = await Promise.all([
+      executeAgentTool(toolCtx, 'tiktok.content.performance', { limit: 50 }),
+      executeAgentTool(toolCtx, 'tiktok.content.patterns', { limit: 50 }),
+      executeAgentTool(toolCtx, 'tiktok.content.opportunities', { regenerate: true }),
+    ]);
+
+    if (
+      performanceEnv.status !== 'SUCCESS' &&
+      patternsEnv.status !== 'SUCCESS' &&
+      opportunitiesEnv.status !== 'SUCCESS'
+    ) {
+      const reason =
+        opportunitiesEnv.error?.message ??
+        performanceEnv.error?.message ??
+        'No TikTok data is available yet to analyze.';
+      return needsPrereq('tiktok-growth', 'TikTok content opportunities', reason);
+    }
+
+    const benchmarks =
+      performanceEnv.status === 'SUCCESS'
+        ? ((performanceEnv.data as { benchmarks: tiktok.TikTokVideoBenchmark[] }).benchmarks ?? [])
+        : [];
+    const patterns =
+      patternsEnv.status === 'SUCCESS'
+        ? ((patternsEnv.data as { patterns: tiktok.TikTokContentPattern[] }).patterns ?? [])
+        : [];
+    const opportunities =
+      opportunitiesEnv.status === 'SUCCESS'
+        ? ((opportunitiesEnv.data as { opportunities: Array<Record<string, unknown>> })
+            .opportunities ?? [])
+        : [];
+
+    const outperforming = benchmarks.filter((b) => b.classification === 'OUTPERFORMING').length;
+    const underperforming = benchmarks.filter((b) => b.classification === 'UNDERPERFORMING').length;
+
+    const evidence = [
+      metric(
+        `${benchmarks.length} recent video(s) benchmarked against this account's own comparable-duration history: ${outperforming} outperforming, ${underperforming} underperforming.`,
+      ),
+      ...patterns.slice(0, 4).map((p) => rec(`${p.label}: ${p.observation}`)),
+    ];
+
+    const recs: CapabilityRecommendation[] = opportunities.slice(0, 6).map((o) => ({
+      title: typeof o.title === 'string' ? o.title : 'Content opportunity',
+      problem: typeof o.description === 'string' ? o.description : '',
+      whyItMatters: Array.isArray(o.evidence)
+        ? (o.evidence as Array<{ statement?: string }>)
+            .map((e) => e.statement)
+            .filter(Boolean)
+            .join(' ')
+        : '',
+      howToFix: Array.isArray(o.recommendedActions)
+        ? (o.recommendedActions as string[]).join(' ')
+        : 'Review this opportunity in /app/tiktok/opportunities.',
+      expectedBenefit:
+        "A content opportunity backed by this account's own history — not a virality prediction or a guarantee.",
+      priority:
+        Number(o.priorityScore ?? 0) >= 0.7
+          ? 'high'
+          : Number(o.priorityScore ?? 0) >= 0.4
+            ? 'medium'
+            : 'low',
+      difficulty: 'medium',
+      confidence: o.confidence === 'HIGH' ? 0.85 : o.confidence === 'MEDIUM' ? 0.6 : 0.35,
+      domain: 'TIKTOK',
+      affectedUrls: [],
+      affectedRefs: Array.isArray(o.relatedVideoIds) ? (o.relatedVideoIds as string[]) : [],
+    }));
+
+    return {
+      capabilityId: 'tiktok-growth',
+      status: 'ok',
+      summary:
+        opportunities.length > 0
+          ? `${opportunities.length} content opportunit${opportunities.length === 1 ? 'y' : 'ies'} identified from this account's own performance history, ranked by priority score.`
+          : 'No content opportunities identified yet from the currently synced videos.',
+      evidence,
+      recommendations: recs,
+    };
+  },
+};
+
 // --- seo-agent ------------------------------------------------
 
 const seoAgentCapability: Capability = {
@@ -832,6 +957,7 @@ export const CAPABILITIES: Capability[] = [
   youtubeMonetizationCapability,
   youtubeGrowthCapability,
   tiktokAnalystCapability,
+  tiktokGrowthCapability,
   seoAgentCapability,
   contentRepurposeCapability,
   growthPlanCapability,

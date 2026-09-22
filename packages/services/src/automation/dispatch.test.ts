@@ -77,6 +77,7 @@ function makeDb(over: Partial<Record<string, unknown>> = {}) {
     },
     task: { findFirst: vi.fn(async () => null) },
     youTubeMetric: { findMany: vi.fn(async () => []) },
+    tikTokMetric: { findMany: vi.fn(async () => []) },
     notification: {
       create: vi.fn(async () => ({ id: 'n1' })),
       upsert: vi.fn(async () => ({ id: 'n1' })),
@@ -123,6 +124,36 @@ describe('dispatchTask routing', () => {
       expect.objectContaining({ accountId: 'acc_1' }),
       expect.anything(),
     );
+  });
+
+  it('TIKTOK_ANALYSIS also runs anomaly detection and notifies on a clear follower spike', async () => {
+    const upsert = vi.fn<AnyFn>(async () => ({ id: 'n1', emailedAt: null }));
+    let followers = 1000;
+    const snapshots = Array.from({ length: 16 }, (_, i) => {
+      const date = new Date('2026-01-01T00:00:00Z');
+      date.setUTCDate(date.getUTCDate() + i);
+      if (i > 0) followers += i % 2 === 0 ? 8 : 12;
+      return {
+        capturedAt: date,
+        followerCount: BigInt(followers),
+        likesCount: BigInt(5000 + i * 50),
+      };
+    });
+    const last = snapshots[snapshots.length - 1]!;
+    snapshots[snapshots.length - 1] = { ...last, followerCount: last.followerCount + 100_000n };
+    const r = await dispatchTask(
+      'TIKTOK_ANALYSIS',
+      ctx,
+      makeDb({
+        tikTokMetric: { findMany: vi.fn(async () => snapshots) },
+        notification: { upsert, create: vi.fn() },
+      }),
+    );
+    expect(upsert).toHaveBeenCalled();
+    const call = upsert.mock.calls[0]?.[0] as { create: Record<string, unknown> };
+    expect(call.create.kind).toBe('tiktok.anomaly_detected');
+    expect(call.create.level).toMatch(/WARNING|CRITICAL/);
+    expect((r.detail as { anomaliesDetected: number }).anomaliesDetected).toBeGreaterThan(0);
   });
 
   it('YOUTUBE_ANALYSIS also runs anomaly detection and notifies on a clear spike', async () => {

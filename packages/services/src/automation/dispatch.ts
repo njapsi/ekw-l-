@@ -20,6 +20,10 @@ import { runYouTubeAnalystJob } from '../youtube/jobs.js';
 import { describeAnomaly, detectAnomalies } from '../youtube/monitoring.js';
 import { getPrimaryAccount } from '../tiktok/read.js';
 import { runTikTokAnalystJob } from '../tiktok/jobs.js';
+import {
+  describeAnomaly as describeTikTokAnomaly,
+  detectAccountAnomalies,
+} from '../tiktok/monitoring.js';
 import { listWebsites, getCrawlOverview } from '../seo/read.js';
 import { startCrawl } from '../seo/jobs.js';
 import { AppError } from '../errors.js';
@@ -144,11 +148,40 @@ async function runTikTokAnalysis(ctx: DispatchContext, db: Db): Promise<Dispatch
     { organizationId: ctx.organizationId, accountId: account.id, trigger: 'automation' },
     db,
   );
+
+  const snapshots = await db.tikTokMetric.findMany({
+    where: { organizationId: ctx.organizationId, tikTokAccountId: account.id },
+    orderBy: { capturedAt: 'asc' },
+    select: { capturedAt: true, followerCount: true, likesCount: true },
+  });
+  const anomalies = detectAccountAnomalies(snapshots);
+  for (const anomaly of anomalies) {
+    await createNotification(
+      {
+        organizationId: ctx.organizationId,
+        userId: ctx.ownerId,
+        kind: 'tiktok.anomaly_detected',
+        level: ANOMALY_NOTIFICATION_LEVEL[anomaly.severity],
+        title: `TikTok: unusual ${anomaly.metric === 'followerGrowthRate' ? 'follower growth' : 'likes growth'} on "${account.displayName ?? account.username ?? account.openId}"`,
+        body: describeTikTokAnomaly(anomaly),
+        linkPath: '/app/tiktok/performance',
+        dedupeKey: `tt-anomaly:${account.id}:${anomaly.metric}:${anomaly.date}`,
+        sourceType: 'tiktok_account',
+        sourceId: account.id,
+      },
+      db,
+    );
+  }
+
   return {
-    summary: `Analysed TikTok account "${account.displayName ?? account.username ?? account.id}".`,
+    summary:
+      anomalies.length > 0
+        ? `Analysed TikTok account "${account.displayName ?? account.username ?? account.id}" — ${anomalies.length} anomaly(ies) detected.`
+        : `Analysed TikTok account "${account.displayName ?? account.username ?? account.id}".`,
     detail: {
       agentRunId: (res as { agentRunId?: string }).agentRunId ?? null,
       accountId: account.id,
+      anomaliesDetected: anomalies.length,
     },
   };
 }

@@ -33,6 +33,7 @@ import {
   runIntegrationTool,
 } from './integration-tools.js';
 import { YOUTUBE_TOOLS, type YouTubeToolName } from './youtube-tools.js';
+import { TIKTOK_TOOLS, type TikTokToolName } from './tiktok-tools.js';
 
 /** LOW → read-only or purely observational. MEDIUM → creates a pending,
  * human-approved request but commits nothing itself. HIGH/CRITICAL describe
@@ -207,10 +208,100 @@ const YOUTUBE_METADATA: Record<YouTubeToolName, Omit<AgentToolMetadata, 'name' |
   },
 };
 
-/** The static catalogue — native + research + YouTube tools, identical for
- * every organization. Never exposes a handler, only the description of what
- * exists (Part 57). Use `listOrgToolMetadata` for the per-org catalogue
- * that also includes enabled MCP tools. */
+/** Category/risk metadata for the TikTok Growth Agent tools (Phase 7, §24).
+ * Every tool but one is READ or ANALYZE/GENERATE against already-synced,
+ * already-connected data, so risk stays LOW. `tiktok.content.publish.draft`
+ * is the one exception: it creates a real, pending TikTok publish draft (a
+ * genuine external action, even though it can never submit on its own) —
+ * MEDIUM risk, category ACTION, `requiresApproval: true`, matching
+ * `integrations.propose_action`'s exact treatment above. */
+const TIKTOK_METADATA: Record<TikTokToolName, Omit<AgentToolMetadata, 'name' | 'description'>> = {
+  'tiktok.account.get': {
+    category: 'READ',
+    integration: 'TIKTOK',
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTEGRATION',
+    organizationScoped: true,
+  },
+  'tiktok.video.list': {
+    category: 'READ',
+    integration: 'TIKTOK',
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTEGRATION',
+    organizationScoped: true,
+  },
+  'tiktok.content.performance': {
+    category: 'ANALYSIS',
+    integration: 'TIKTOK',
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTEGRATION',
+    organizationScoped: true,
+  },
+  'tiktok.content.compare': {
+    category: 'ANALYSIS',
+    integration: 'TIKTOK',
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTEGRATION',
+    organizationScoped: true,
+  },
+  'tiktok.content.patterns': {
+    category: 'ANALYSIS',
+    integration: 'TIKTOK',
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTEGRATION',
+    organizationScoped: true,
+  },
+  'tiktok.content.opportunities': {
+    category: 'ANALYSIS',
+    integration: 'TIKTOK',
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTEGRATION',
+    organizationScoped: true,
+  },
+  'tiktok.content.calendar.generate': {
+    category: 'GENERATION',
+    integration: 'TIKTOK',
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTEGRATION',
+    organizationScoped: true,
+  },
+  'tiktok.experiment.create': {
+    category: 'GENERATION',
+    integration: 'TIKTOK',
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTEGRATION',
+    organizationScoped: true,
+  },
+  'tiktok.report.generate': {
+    category: 'GENERATION',
+    integration: 'TIKTOK',
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTEGRATION',
+    organizationScoped: true,
+  },
+  'tiktok.content.publish.draft': {
+    category: 'ACTION',
+    integration: 'TIKTOK',
+    riskLevel: 'MEDIUM',
+    requiresApproval: true,
+    providerType: 'INTEGRATION',
+    organizationScoped: true,
+  },
+};
+
+/** The static catalogue — native + research + YouTube + TikTok tools,
+ * identical for every organization. Never exposes a handler, only the
+ * description of what exists (Part 57). Use `listOrgToolMetadata` for the
+ * per-org catalogue that also includes enabled MCP tools. */
 export function listToolMetadata(): AgentToolMetadata[] {
   const native = Object.values(INTEGRATION_TOOLS).map((tool) => ({
     name: tool.name,
@@ -227,7 +318,12 @@ export function listToolMetadata(): AgentToolMetadata[] {
     description: tool.description,
     ...YOUTUBE_METADATA[tool.name],
   }));
-  return [...native, ...research, ...youtube];
+  const tiktok = Object.values(TIKTOK_TOOLS).map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    ...TIKTOK_METADATA[tool.name],
+  }));
+  return [...native, ...research, ...youtube, ...tiktok];
 }
 
 /**

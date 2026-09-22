@@ -1340,6 +1340,64 @@ executionFeasibility·0.15`, `audienceRelevance` deliberately omitted for
   purely on already-synced database rows and was unit-tested against
   hand-built fixtures instead. See `docs/YOUTUBE-GROWTH-AGENT.md`,
   `docs/PHASE-6-REPORT.md`, ADR-0056.
+- **TikTok Growth Agent — content strategy layer** ✅ (operator's
+  "Phase 7"): the same content-strategy layer as Phase 6, extending
+  TikTok's existing integration — which the audit found already more
+  mature than YouTube pre-Phase-6, since it already has real, audited
+  Content Posting API publishing (draft → explicit approval → submit →
+  status poll → audit log at every step; content-hash dedupe re-checked
+  at both draft and submit time). Six new pure-logic modules
+  (`packages/services/src/tiktok/{benchmark,patterns,opportunities,
+experiments,calendar,monitoring}.ts`), module-for-module mirrors of the
+  YouTube ones, adapted only where TikTok's real API shape differs:
+  duration-bucket benchmarking (short ≤60s vs. extended >60s — TikTok
+  supports multi-minute videos, a real distinction); hashtag-cluster
+  pattern detection (reusing `themeClusters`); the identical four-factor
+  PRIORITY SCORE formula; identical 15%-threshold experiment evaluation;
+  content-plan generation (model named `TikTokContentPlan`, matching this
+  phase's brief). **Anomaly detection could not reuse YouTube's
+  trailing-calendar-day baseline** — TikTok's `TikTokMetric` is an
+  irregularly-spaced snapshot table, never daily — so
+  `detectAccountAnomalies` computes per-day growth _rates_ between
+  consecutive snapshots (`Δvalue / elapsed days`, dropping near-duplicate
+  pairs) and z-scores that normalized series instead. **A real structural
+  bug found and fixed this phase**: `tiktok.publish`'s contract-resolved
+  `.usable` flag is _always_ `false` by design (`resolveCapabilities`
+  never promotes a `REQUIRES_PROVIDER_APPROVAL` baseline the way it does
+  `REQUIRES_SCOPE`), so the first draft of both `capability-matrix.ts` and
+  the new publish tool incorrectly gated on it — would have blocked
+  drafting even with the scope granted, unlike the real, working
+  `createTikTokDraftAction`; a connected-with-scope test fixture caught
+  it, fixed by checking the connection's granted scope directly instead
+  of `.usable` for this one capability. New Prisma migration
+  `20260926120000_tiktok_growth_agent` (`TikTokOpportunity`,
+  `TikTokExperiment`, `TikTokContentPlan`, additive) — five other
+  brief-named models (`TikTokProfile`, `TikTokVideoAnalytics`,
+  `TikTokAudienceSnapshot`, `TikTokRecommendation`, `TikTokApiEvent`)
+  deliberately not created since an equivalent already exists.
+  **`agent/tiktok-tools.ts`** — ten tools as a closed allowlist through
+  the existing `executeAgentTool`; nine are `LOW` risk, and
+  `tiktok.content.publish.draft` (the one tool touching a real write
+  path) is `MEDIUM` risk / `ACTION` / `requiresApproval: true` — it only
+  ever creates an `AWAITING_APPROVAL` draft via the existing `publish.ts`
+  flow, never submits, and re-derives the caller's `publish:external`
+  permission from the database at call time (`assertJobAuthorized`,
+  since `agent:run` alone does not imply publish rights). A new
+  `tiktok-growth` orchestrator capability (`agent/capabilities.ts`) is
+  the one TikTok capability that calls `executeAgentTool` instead of a
+  `tiktok/*` function directly; `tiktok-analyst` is untouched.
+  `reports/facts.ts`'s `gatherTikTok` and `automation/dispatch.ts`'s
+  `runTikTokAnalysis` extended identically to their YouTube counterparts.
+  UI: `/app/tiktok/opportunities` gained a real priority-scored
+  opportunities section; `/app/tiktok/performance` gained a per-video
+  benchmark section; new `/app/tiktok/calendar` and
+  `/app/tiktok/experiments` pages. Gates green: lint 14/14, typecheck
+  14/14, **`packages/services` 1161 tests** (+61), web build, tenant
+  -scope clean. **Verification limit, disclosed**: no live TikTok
+  developer credentials exist in this sandbox, so none of the new read
+  paths (nor the pre-existing sync/publish paths they build on) were
+  verified against a real account. See `docs/TIKTOK-GROWTH-AGENT.md`,
+  `docs/PHASE-7-REPORT.md`, ADR-0057.
 - **Still outstanding:** Postgres **RLS** (ADR-0035, re-affirmed in
   ADR-0052 — application-layer scoping + the CI tenant-scope lint +
   integration tests, now actually running, remain the accepted mitigation);
@@ -1359,12 +1417,12 @@ executionFeasibility·0.15`, `audienceRelevance` deliberately omitted for
   actual live `growth-agent` capability (the infrastructure and tests
   exist for both — see ADR-0054/ADR-0055, `docs/AGENT-RUNTIME.md` §6,
   `docs/MCP.md` — nothing in the live orchestrator path calls either yet;
-  **partially closed by Phase 6/ADR-0056** — the Tool Executor and its
-  Policy Engine are now the live dispatch path for one capability,
-  `youtube-growth`, calling `youtube.*` tools directly rather than via a
-  model-driven tool-calling loop; the remaining domains (TikTok, SEO) and
-  true agent-selected tool-calling are still unwired); running
-  `mcp/tenant-isolation.integration.test.ts`
+  **partially closed by Phase 6/ADR-0056 and Phase 7/ADR-0057** — the
+  Tool Executor and its Policy Engine are now the live dispatch path for
+  two capabilities, `youtube-growth` and `tiktok-growth`, calling
+  `youtube.*`/`tiktok.*` tools directly rather than via a model-driven
+  tool-calling loop; SEO and true agent-selected tool-calling are still
+  unwired); running `mcp/tenant-isolation.integration.test.ts`
   against a real database (written, typechecks, self-skips correctly, but
   unverified against Postgres — see the Phase 5 bullet above); connecting
   a real external MCP server (only a hand-rolled protocol-correct fixture

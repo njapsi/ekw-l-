@@ -10,6 +10,8 @@ import * as tiktokRead from '../tiktok/read.js';
 import * as youtubeRead from '../youtube/read.js';
 import { listYouTubeOpportunities } from '../youtube/opportunities.js';
 import { listExperiments } from '../youtube/experiments.js';
+import { listTikTokOpportunities } from '../tiktok/opportunities.js';
+import { listExperiments as listTikTokExperiments } from '../tiktok/experiments.js';
 import {
   FactSheet,
   fmtCompact,
@@ -228,6 +230,46 @@ async function gatherTikTok(orgId: string, db: Db): Promise<GatheredReport> {
   }
   if (overview.account.followerCount == null) {
     g.dataGaps.push('TikTok did not grant follower/stats scope — audience size is unavailable.');
+  }
+
+  const [opportunities, experiments] = await Promise.all([
+    listTikTokOpportunities(orgId, { status: 'SUGGESTED' }, db),
+    listTikTokExperiments(orgId, {}, db),
+  ]);
+  if (opportunities.length > 0) {
+    metrics.push(
+      metric('Open content opportunities', opportunities.length, fmtInt(opportunities.length)),
+    );
+    fs.push(
+      `${opportunities.length} open content opportunit${opportunities.length === 1 ? 'y' : 'ies'} identified, top-ranked: "${opportunities[0]!.title}" (priority score ${opportunities[0]!.priorityScore.toFixed(2)}).`,
+    );
+    for (const o of opportunities.slice(0, 5)) {
+      g.opportunities.push({
+        id: `tt-opp-${o.id}`,
+        title: o.title,
+        detail: o.description,
+        potential: o.confidence,
+        effort: o.executionFeasibility >= 0.7 ? 'small' : 'medium',
+      });
+    }
+  }
+  const completedExperiments = experiments.filter((e) => e.status === 'COMPLETED');
+  if (completedExperiments.length > 0) {
+    const supported = completedExperiments.filter((e) => e.conclusion === 'SUPPORTED').length;
+    metrics.push(
+      metric(
+        'Completed experiments',
+        completedExperiments.length,
+        fmtInt(completedExperiments.length),
+      ),
+    );
+    fs.push(
+      `${completedExperiments.length} experiment(s) completed; ${supported} supported the hypothesis, matching this account's own before/after data.`,
+    );
+  }
+  const runningExperiments = experiments.filter((e) => e.status === 'RUNNING').length;
+  if (runningExperiments > 0) {
+    fs.push(`${runningExperiments} experiment(s) currently running.`);
   }
 
   g.metrics = metrics;

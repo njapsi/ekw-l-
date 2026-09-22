@@ -6,6 +6,133 @@ reversal gets a new ADR that supersedes the old one.
 
 ---
 
+## ADR-0057 — TikTok Growth Agent: the same content-strategy layer as YouTube, adapted for a mature vertical slice that already has real publishing, no daily analytics, and a structural capability-matrix bug this phase found and fixed
+
+**Context.** Phase 7 asked for a production-grade "TikTok Growth Agent"
+covering the same content-strategy surface Phase 6 built for YouTube
+(benchmarking, pattern detection, a priority-scored opportunity engine, a
+content calendar, experiments, anomaly monitoring, reporting) plus explicit
+"approved publishing capabilities." The audit-first step found TikTok's
+existing integration to be a genuinely mature, production-shaped vertical
+slice — more mature than YouTube pre-Phase-6, because it already has real
+write/publish capability: PKCE + signed, session-bound OAuth; a typed
+Display API client and Content Posting API client with resilient retry;
+incremental sync; a grounded Analyst Agent; and a **real, already-audited**
+publish flow (`publish.ts`) with an explicit human-approval gate, a
+content-hash dedupe guard re-checked at both draft and submit time, status
+polling, and audit logging at every transition. Nothing in the audit was
+mocked or faked. The one concrete gap, identical in shape to Phase 6's
+finding for YouTube: the orchestrator's `tiktok-analyst` capability calls
+`tiktok/*` functions directly, never through the Phase 5 Tool Registry /
+Policy Engine / Tool Executor.
+
+**Decision.**
+
+1. **Six new pure-logic modules, mirroring `youtube/{benchmark,patterns,
+opportunities,experiments,calendar,monitoring}.ts` module-for-module**,
+   adapted only where TikTok's real API shape actually differs: duration
+   -bucket benchmarking (short ≤60s / extended >60s, since TikTok now
+   supports multi-minute videos — a real distinction, not an invented
+   one) in place of YouTube's Shorts/long-form split; hashtag-cluster
+   pattern detection reusing the existing `themeClusters` in place of
+   YouTube's tag-based `topicClusters`; the identical four-factor
+   PRIORITY SCORE formula; identical experiment evaluation (15%
+   -meaningful-change floor, same confidence buckets); content-plan
+   generation with the model named `TikTokContentPlan` (matching this
+   phase's own brief naming, where Phase 6 left the equivalent YouTube
+   entity unnamed).
+2. **Anomaly detection could not simply reuse YouTube's trailing-calendar
+   -day baseline**, because TikTok's `TikTokMetric` table is an
+   irregularly-spaced periodic snapshot, never a daily table — a genuine,
+   documented API limitation, not an oversight. Rather than fabricate a
+   daily cadence that doesn't exist, `detectAccountAnomalies` computes
+   **per-day growth rates between consecutive snapshots** (each pair's
+   `Δvalue / elapsed days`, dropping any pair closer than half a day
+   apart) and runs the same transparent z-score baseline check over that
+   normalized rate series instead of raw values — comparable across
+   uneven spacing without inventing data.
+3. **A real, structural bug was found and fixed in the capability-matrix
+   design, not just in TikTok's pre-existing code**: `integrations/
+contract.ts`'s `resolveCapabilities` deliberately never promotes a
+   `REQUIRES_PROVIDER_APPROVAL` baseline to `AVAILABLE` the way it does for
+   `REQUIRES_SCOPE` (TikTok public posting always needs an app audit,
+   regardless of scope) — meaning `tiktok.publish`'s `.usable` flag is
+   **always false**, structurally, independent of whether the connection
+   actually holds the `video.publish` scope. The first draft of this
+   phase's own `capability-matrix.ts` and `tiktok.content.publish.draft`
+   tool both gated on `.usable` for this capability, which would have
+   incorrectly reported drafting as unavailable even when a `SELF_ONLY`
+   draft would work today — exactly what the existing, real
+   `createTikTokDraftAction` Server Action already allows, unaudited. A
+   dedicated test built a connected-with-scope fixture (rather than only
+   the empty-database case every other capability test used) and caught
+   this before it shipped; both were fixed to check the connection's
+   actual granted scope directly instead of `.usable` for this one
+   capability, leaving `.usable`'s existing meaning for the Connection
+   Center's own display untouched.
+4. **`tiktok.content.publish.draft` is the one new tool that touches a
+   real write path**, and it is deliberately narrow: it creates an
+   `AWAITING_APPROVAL` draft via the existing, already-audited
+   `publish.ts` flow and **never submits** — only the UI's "Approve &
+   publish" button ever passes `approve: true`. Because `publish:external`
+   is an ADMIN+-only permission distinct from the `agent:run` permission
+   that lets any MEMBER reach the agent's tools at all, the tool
+   re-derives the caller's authorization from the database at call time
+   via `security/job-auth.ts`'s existing `assertJobAuthorized` — built for
+   background jobs, reused here for the identical reason ("never trust a
+   role carried in a payload/context, re-check at the moment of action").
+   A dedicated test with a MEMBER-role caller and a connected, scoped
+   TikTok account confirms the refusal.
+5. **Five named models from the brief's own "at minimum" list were
+   deliberately not created**, each because an equivalent already exists:
+   `TikTokProfile` (redundant with `TikTokAccount`), `TikTokVideoAnalytics`
+   (redundant with `TikTokVideo` + `TikTokMetric`), `TikTokAudienceSnapshot`
+   (no audience data source exists — a table for it would either sit
+   permanently empty or invite fabrication), `TikTokRecommendation` (the
+   generic `Recommendation` model already covers `domain: 'TIKTOK'`), and
+   `TikTokApiEvent` (the existing `TikTokSyncRun.error` field, the audit
+   module, and `IntegrationHealth` already give this observability).
+   `TikTokContentPattern` is also not persisted, matching the YouTube
+   precedent — patterns are cheap to recompute on demand.
+
+**Alternatives considered.**
+
+- _Gate `tiktok.content.publish.draft` on `assertCapabilityUsable(ctx,
+'tiktok.publish')`, matching every other tool's pattern._ Rejected once
+  the `.usable` bug (§2/Decision 3) was found — doing so would make the
+  agent's publish-draft tool permanently unusable regardless of scope,
+  which is both wrong and inconsistent with the real, working
+  `createTikTokDraftAction` Server Action.
+- _Reuse `youtube/monitoring.ts`'s exact trailing-calendar-day baseline for
+  TikTok._ Rejected — TikTok's snapshot cadence is not daily and treating
+  it as if it were would silently assume a data density that doesn't
+  exist, violating hard rule 1.
+- _Unify TikTok's bespoke publish-approval state machine with the generic
+  `IntegrationActionRequest`/`approvals/` system Phase 1 built for
+  WordPress._ Rejected as out of scope for this phase (brief §47: "do not
+  overbuild," and explicitly "do not rebuild the entire application") —
+  TikTok's existing flow already satisfies every safety property the
+  brief's own §26 publishing-safety flow asks for; unifying two working
+  systems is a larger, separate refactor with no functional gap to close.
+
+**Consequences.** The TikTok domain now has one capability
+(`tiktok-growth`) that proves the Phase 4/5 architecture is load-bearing
+for genuinely new functionality, matching YouTube's `youtube-growth`
+precedent — both TikTok and YouTube domains are now wired the same way,
+leaving SEO as the one remaining domain not yet using this pattern. The
+`tiktok.publish` capability-matrix bug this phase caught did not ship to
+any user-facing surface (found and fixed within the same phase, before any
+commit), but it is a reminder that a capability whose contract baseline is
+`REQUIRES_PROVIDER_APPROVAL` needs its own resolution logic wherever it is
+consumed — `resolveCapabilities`'s `.usable` field is not a safe universal
+proxy for "the underlying action can be attempted." No live TikTok API
+credentials exist in this sandbox, so — identical to every prior
+TikTok-touching phase — none of this phase's new read paths, nor the
+pre-existing sync/publish paths they build on, were verified against a
+real account.
+
+---
+
 ## ADR-0056 — YouTube Growth Agent: benchmarking, patterns, a documented priority score, calendar/experiments/anomaly detection — routed through the existing Tool Registry and Policy Engine, not a new one
 
 **Context.** Phase 6 asked for a production-grade "YouTube Growth Agent"
