@@ -70,6 +70,9 @@ vi.mock('./events.js', () => ({
     (recordAgentRunEvent as (...x: unknown[]) => unknown)(...a),
 }));
 
+// A short, test-only deadline — the module reads this env var once at
+// import time, so it must be set before the dynamic import below.
+process.env.AGENT_TOOL_TIMEOUT_MS = '25';
 const { executeAgentTool } = await import('./tool-executor.js');
 
 afterEach(() => {
@@ -184,5 +187,13 @@ describe('executeAgentTool', () => {
   it('records no events at all when no agentRunId is supplied (a standalone call)', async () => {
     await executeAgentTool(CTX, 'integrations.list_connections', {});
     expect(recordAgentRunEvent).not.toHaveBeenCalled();
+  });
+
+  it('never lets a tool call hang indefinitely — a hung dispatch is surfaced as UNAVAILABLE after the deadline', async () => {
+    runIntegrationTool.mockImplementationOnce(() => new Promise(() => undefined)); // never resolves
+    const env = await executeAgentTool(CTX, 'integrations.list_connections', {});
+    expect(env.status).toBe('BLOCKED');
+    expect(env.error?.code).toBe('UNAVAILABLE');
+    expect(env.error?.message).toMatch(/did not complete within/i);
   });
 });

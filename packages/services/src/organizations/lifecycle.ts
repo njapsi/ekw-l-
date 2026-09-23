@@ -316,6 +316,9 @@ export async function purgeUser(userId: string, db: Db = prisma): Promise<boolea
 
   const tombstone = `deleted+${createHash('sha256').update(userId).digest('hex').slice(0, 24)}@deleted.invalid`;
   await runInTransaction(db, async (tx) => {
+    // tenant-scope-ok: purging a deleted user removes their membership from
+    // every organization they belong to, by design — there is no single
+    // organizationId to scope this to.
     await tx.membership.deleteMany({ where: { userId } });
     await tx.account.deleteMany({ where: { userId } });
     await tx.session.deleteMany({ where: { userId } });

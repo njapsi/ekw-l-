@@ -97,6 +97,15 @@ export function BillingPanels({
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-wrap gap-2">
+          {summary.seatSummary.limit !== null || summary.seatSummary.invited > 0 ? (
+            <p className="text-muted-foreground w-full text-xs">
+              Seats: {summary.seatSummary.active} active
+              {summary.seatSummary.invited > 0 ? `, ${summary.seatSummary.invited} invited` : ''}
+              {summary.seatSummary.limit !== null
+                ? ` of ${summary.seatSummary.limit} (${summary.seatSummary.available} available)`
+                : ' · unlimited'}
+            </p>
+          ) : null}
           {canManage && summary.hasStripeCustomer ? (
             <Button
               size="sm"

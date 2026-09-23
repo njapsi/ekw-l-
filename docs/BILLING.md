@@ -212,19 +212,136 @@ and `invoice.*`.
 - **No card data, ever.** Stripe holds all PCI scope; the app stores only
   `stripeCustomerId` / `stripeSubscriptionId` / `stripePriceId` and an
   amounts-only `Invoice` mirror.
-- **The scan-style reconcile + counter rollup run inline** (ADR-0013 pattern) —
-  no worker queue was added; `runBillingReconcileJob` / `rebuildUsageCountersJob`
-  are ready for a scheduler. Subscription _expiration_ between webhooks is
-  covered by the `resolvePeriod` calendar-month fallback + the nightly
-  reconcile.
 - **No Stripe usage-record push** for metered overage yet — limits are hard caps
   enforced at the app; overage billing is a follow-up.
 - **`AI_TOKENS` and `CRAWL_PAGES` are enforced as exhaustion gates**, not
   reservations (a call's token / page count is unknowable up front) — a single
   operation can overshoot by one unit before the counter catches up (ADR-0038).
+  Phase 13's new atomic `reserveUsage` (§12 below) doesn't change this — it's
+  for meters whose quantity *is* known up front.
 - **Tier enforcement middleware / RLS** is Phase 3 (auth & tenancy hardening),
   not this phase. Enforcement today is in the `usage` module at each call site.
 - The `STARTER` tier from the roadmap shipped as **`CREATOR`**.
+- **Credits have no purchase flow** (§10) — the ledger primitive is real and
+  race-safe, but nothing sells a one-time credit pack; Stripe Checkout here
+  is subscription-only. Grants are support/admin-initiated only.
+- **No coupon engine was built** — Stripe's own `allow_promotion_codes: true`
+  (already set on every checkout session, `gateway.ts::createCheckoutSession`)
+  already lets a customer apply a Stripe-managed promotion code at checkout;
+  building a parallel discount system would duplicate what Stripe already
+  does correctly.
+- **No in-app refund/chargeback flow** — Stripe's own dashboard/portal covers
+  this; nothing in this deployment's product requirements asked for
+  admin-initiated refunds from inside the app.
+- **Tax is not calculated by this app** — if Stripe Tax is enabled on the
+  Stripe side, Checkout already handles it; nothing here would need to
+  change to support that.
+- **USD only** — every plan price and every `Invoice`/`CreditTransaction`
+  amount is implicitly USD; `Invoice.currency` mirrors whatever Stripe sends
+  (for a future non-USD price), but nothing in the app converts or displays
+  a second currency.
 
 See `docs/BILLING-PRODUCTION-AUDIT.md` for the Phase-23 audit matrix (plans ·
-lifecycle · security · usage enforcement).
+lifecycle · security · usage enforcement) and `docs/PHASE-13-REPORT.md` for
+this phase's full change log.
+
+---
+
+## 10. Credit ledger (Phase 13)
+
+`billing/credits.ts` — a per-organization, per-meter balance that **adds
+to**, never replaces, the plan's own usage allowance. `CreditTransaction` is
+append-only (types `PURCHASE` / `GRANT` / `CONSUMPTION` / `REFUND` /
+`ADJUSTMENT` / `EXPIRATION`); the current balance is always the
+`balanceAfter` of the most recent row for that (org, meter) pair — there is
+no mutable `balance` column anywhere. `grantCredits`/`consumeCredits`/
+`adjustCredits` are all transactional; `consumeCredits` refuses an overdraft
+(throws `validation_failed`, not `usage_limit_exceeded` — a credit shortfall
+is a different condition from a plan-limit rejection) rather than letting the
+balance go negative. Not yet wired into `usage.check`/`enforceUsage` as an
+automatic "spill over into credits when the plan limit is hit" — that
+integration is a real, disclosed next step, not implemented this phase
+(nothing in the product surface today grants or sells credits, so there was
+no live scenario to design that integration against yet).
+
+## 11. Enterprise contracts (Phase 13)
+
+`billing/enterprise.ts` — `EnterpriseContract` is a per-org negotiated
+agreement layered as a further override on the existing PLAN → contract →
+OVERRIDE/PROMO `Entitlement` resolution (`entitlements.ts::resolveEntitlements`),
+never a parallel authorization path. `customEntitlements` mirrors
+`Entitlement`'s own `limit:<METER>` / `feature:<name>` key shape. Priority,
+per the master brief: a per-key `Entitlement` OVERRIDE/PROMO row still wins
+over a contract — "Enterprise does not mean unrestricted." An expired
+(`contractEnd` passed) or `CANCELLED` contract simply stops applying; the
+org falls back to its plan default, nothing is deleted. No enterprise admin
+UI was built this phase (`createEnterpriseContract`/`expireEnterpriseContract`
+are real, tested service functions, callable today only from a script or a
+future admin action) — a disclosed scope limit, not a missing feature.
+
+## 12. Atomic usage reservation (Phase 13)
+
+`usage/reserve.ts` — closes a real TOCTOU race the existing `enforceUsage`
+→ do work → `recordUsage` cycle has: `enforceUsage` only reads the counter,
+so N concurrent callers can all see "under the limit" before any of them
+writes, overshooting the cap by up to N-1 units. `reserveUsage` combines the
+check and the increment into one atomic conditional `updateMany` (`used <=
+limit - quantity`) — the same idempotent-claim shape already proven for
+mission-task/research-project claiming (Phase 12) — rather than a `SELECT
+... FOR UPDATE` this sandbox has no live Postgres to verify raw SQL against.
+`releaseUsageReservation` is the "settle down" half: when real usage is less
+than what was reserved, the caller releases the unused delta as a negative,
+append-only adjustment record, never a rewrite. Migrated onto this phase:
+`content-actions.ts`'s `generateAssetsAction` (a variable amount, settled
+down to the actual asset count) and `regenerateAssetAction` (fixed amount
+1). Every other `enforceUsage`/`recordUsage` call site is unchanged, keeping
+its existing, smaller, previously-accepted race window — this was a
+deliberate, scoped migration of the two clearest candidates, not a
+wholesale rewrite of every metered call site. **A real, hard-won bug fix
+along the way**: building this exposed and fixed two genuine bugs in the
+shared `testing/memory-db.ts` test harness — a naive whole-row transaction
+-rollback that could erase a *different*, concurrently-committed
+transaction's write, and a `cmp()` helper that mis-ordered a Number against
+a BigInt of the identical value (`4 === 4n` is `false` in JS, and the old
+code assumed "not equal, not less-than" meant "greater than," so an
+exact-boundary usage check silently rejected a claim that should have
+succeeded) — both fixed and now covered by `usage/reserve.test.ts`'s own
+10-concurrent-reservations-vs-5-capacity test, which failed under the buggy
+harness and passes under the fixed one.
+
+## 13. Pre-downgrade impact check (Phase 13, §29)
+
+`billing/downgrade-impact.ts::getDowngradeImpact` — a read-only report of
+exactly what a prospective plan change would affect: which meters' current
+usage already exceeds the target plan's cap, which features would be lost,
+and whether the org is over the target's seat limit. `plan-change.ts`'s
+`changePlan` is unchanged — this is what a UI calls *first* to show a
+warning and let the customer decide, never an automatic block. Consistent
+with the master instruction: nothing is ever deleted because of a
+downgrade; only new usage going forward is capped by the new limit.
+
+## 14. Seat summary (Phase 13, §42)
+
+`getBillingSummary` now returns `seatSummary: { active, invited, limit,
+available }` — active members (existing `SEATS` gauge), pending invitations
+(not accepted, not revoked, not expired), the effective seat cap (already
+enterprise-contract- and override-aware via `resolveEntitlements`), and how
+many more the org can add before hitting it. Surfaced on `/app/billing`.
+Existing members are never removed automatically for being over a new
+limit — same "don't delete data" principle as a downgrade.
+
+## 15. Billing worker queue (Phase 13, §93)
+
+A real `billing` BullMQ queue now exists (`apps/worker/src/processors/
+billing.ts`), closing what `docs/BILLING.md`'s own §9 disclosed as a gap
+through Phase 12: `runBillingReconcileJob`/`rebuildUsageCountersJob`
+(real since Phase 10) were never actually scheduled. Three repeatable
+ticks: `reconcile` (every 6h — pulls the truth from Stripe for every org
+with a subscription id and re-applies it, then rebuilds that org's usage
+counters), `usage-alerts` (every 15 min — 80/90/100% usage-threshold
+notifications, idempotent per org/meter/threshold/period,
+`billing/alerts.ts::runUsageAlertsJob`), and `trial-ending` (every 6h —
+warns an org a few days before `trialEndsAt`; Stripe's own webhook still
+drives the actual trial → active/past_due transition,
+`runTrialEndingSoonJob`). All three reuse the existing `notifications`
+module's idempotent-on-`dedupeKey` upsert — no new notification mechanism.

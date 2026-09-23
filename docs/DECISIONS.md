@@ -6,6 +6,271 @@ reversal gets a new ADR that supersedes the old one.
 
 ---
 
+## ADR-0062 — Phase 13 billing: atomic usage reservation (a new primitive, not a rewrite of `enforceUsage`), a credit ledger and enterprise contracts layered onto the existing entitlement resolution, and a real billing worker queue
+
+**Context.** Phase 13's brief (117 sections) asked for a from-scratch
+commercial-platform hardening pass, with the same "audit first, harden
+genuine gaps, never build a second billing/usage system" discipline as
+every prior phase. The mandatory audit found the existing billing system —
+`billing/*` + `usage/*`, built across Phases 10, 23 and 31 — already
+implements almost everything the brief describes under different names: a
+config-driven plan catalog, a hand-rolled Stripe REST gateway (no SDK), a
+`Subscription` mirror, `Entitlement` rows with a PLAN/OVERRIDE/PROMO
+priority already matching the brief's own layering concept, an append-only
+`UsageRecord` ledger rolled up into `UsageCounter`, and a doubly-idempotent
+webhook handler. The genuine gaps: (1) `enforceUsage`'s check-then-act
+shape has a real TOCTOU race under concurrency (the brief's own named
+acceptance tests #99/#110); (2) `runBillingReconcileJob`/
+`rebuildUsageCountersJob` existed since Phase 10 but were never actually
+scheduled — a gap `docs/BILLING.md` §9 had disclosed since Phase 23 and
+nothing had closed; (3) no usage-threshold or trial-ending notifications
+existed; (4) no credit ledger, enterprise contract, or pre-downgrade
+warning existed at all — confirmed by an exhaustive grep, not assumed.
+
+**Decision.**
+
+1. **A new atomic primitive (`usage/reserve.ts`), not a rewrite of
+   `enforceUsage`.** `reserveUsage`/`releaseUsageReservation` combine the
+   check and the increment into one atomic conditional `updateMany` (`used
+   <= limit - quantity`) — the same idempotent-claim shape already proven
+   for mission-task and research-project claiming (Phase 12) — rather than
+   `SELECT ... FOR UPDATE`, which this sandbox has no live Postgres to
+   verify as raw SQL. `enforceUsage`/`recordUsage` are untouched; every
+   existing call site keeps its current, smaller, already-accepted race
+   window. Two call sites (`content-actions.ts`'s `generateAssetsAction`/
+   `regenerateAssetAction`) were migrated as the clearest, safest, fully
+   -tested examples, not a wholesale rewrite of every metered call site —
+   migrating more would mean re-auditing each site's own settle/release
+   semantics individually, which the brief's own scope discipline argues
+   against doing speculatively.
+2. **Building this surfaced and fixed two real, previously-latent bugs in
+   the shared `testing/memory-db.ts` test harness**, not in application
+   code: a naive `$transaction` implementation that snapshotted and
+   restored the *entire* database on rollback (correct only if
+   transactions never interleave, which concurrent reservations
+   deliberately do — a rejected transaction's rollback could silently
+   erase a different, already-committed transaction's write) was replaced
+   with a proper per-row undo journal that only reverts what *that*
+   transaction itself touched; and `cmp()`'s equality check (`av === bv`)
+   never recognized a `Number` and a `BigInt` of the identical magnitude as
+   equal (`4 === 4n` is `false` in JS), so a boundary check
+   (`{lte: 5n}` against a stored value of exactly `5`, silently widened
+   from `bigint` to `Number` by the harness's own `increment` handling)
+   misreported an exact match as "greater than" and wrongly rejected a
+   claim that should have succeeded — reproduced as a genuine test failure
+   (4 successes instead of 5 in a 10-concurrent-reservations-vs-5-capacity
+   test) before being root-caused and fixed. Both fixes are permanent,
+   reusable harness improvements, not one-off workarounds, following the
+   precedent Phase 11 set for exactly this kind of shared-infrastructure
+   fix.
+3. **The billing worker queue reuses the existing job functions.**
+   `apps/worker/src/processors/billing.ts` + a new `billing` BullMQ queue
+   call `billing.runBillingReconcileJob`/`runUsageAlertsJob`/
+   `runTrialEndingSoonJob` — all of which are `packages/services` functions
+   that already existed or were added this phase as plain, directly
+   -testable functions; the worker file is pure wiring, following exactly
+   the `automation`/`integrations`/`missions` queue precedent (a processor
+   dispatching on `job.data.type`, repeatable ticks registered once at
+   worker start).
+4. **Credits and enterprise contracts are additive layers on the existing
+   `Entitlement` resolution, not new authorization paths.**
+   `EnterpriseContract.customEntitlements` reuses `Entitlement`'s own
+   `limit:<METER>`/`feature:<name>` key shape, and `resolveEntitlements`
+   applies it between the plan default and a per-key OVERRIDE/PROMO row —
+   an override still wins over a contract, matching the brief's own
+   explicit "Enterprise does not mean unrestricted." `CreditTransaction` is
+   a separate, append-only ledger consulted independently of
+   `Entitlement`/`UsageCounter` — deliberately **not** wired into
+   `usage.check`'s automatic "spill into credits" path this phase, since no
+   product surface today grants or sells credits, so there was no real
+   scenario to validate that integration against; building it speculatively
+   would risk exactly the kind of untested, unused code path this
+   project's own conventions warn against.
+5. **The pre-downgrade impact check and seat summary are pure reads over
+   existing data.** `getDowngradeImpact` and `getBillingSummary`'s new
+   `seatSummary` field add no schema and no new authorization surface —
+   they compose `getUsageSummary`/`resolveEntitlements`/membership and
+   invitation counts that already existed.
+6. **No coupon engine, no in-app refund flow, no tax calculation, no
+   multi-currency support were built.** Stripe's own `allow_promotion_codes:
+true` (already set) covers discounts; a refund/chargeback flow and tax
+   handling have no product requirement behind them in this deployment; the
+   app is disclosed as USD-only. Building any of these speculatively would
+   be exactly the "unnecessarily implementing a complex coupon engine" the
+   brief's own §64 explicitly warns against.
+
+**Alternatives considered.**
+
+- *Rewrite `enforceUsage`/`recordUsage` globally to be reservation-based.*
+  Rejected — touching ~15+ existing, working, already-tested call sites'
+  dual-idempotency-key semantics under this phase's time budget was judged
+  a materially higher regression risk than adding a new, narrowly-scoped
+  primitive and migrating two clear examples.
+- *Use `SELECT ... FOR UPDATE` for the atomic reservation.* Rejected — no
+  live Postgres exists in this sandbox to verify hand-written raw SQL
+  (table/column quoting, enum casting) actually behaves as intended; the
+  conditional-`updateMany` shape is expressible entirely through Prisma's
+  typed client and is the same pattern this codebase already trusts for
+  mission-task/research-project claiming.
+- *Build a credit-purchase checkout flow now.* Rejected — no product
+  surface sells credits today; the ledger primitive is real and complete
+  without it, and a checkout flow with no product hook is speculative
+  build-ahead.
+- *Give `EnterpriseContract` its own bespoke authorization check.* Rejected
+  — layering it into the existing `resolveEntitlements` resolution order
+  keeps exactly one authority for "what can this org do," matching this
+  project's own repeated "no second authorization path" convention.
+
+**Consequences.** `packages/services` grew by two hand-authored, additive
+migrations' worth of schema (`CreditTransaction`, `EnterpriseContract`) and
+a meaningful new test surface (`usage/reserve.test.ts`'s concurrency proof,
+`billing/credits.test.ts`, `billing/enterprise.test.ts`,
+`billing/downgrade-impact.test.ts`). The two test-harness bugs fixed in
+passing make every *future* phase's concurrency-sensitive test more
+trustworthy, not just this one's. Known, disclosed gaps carried forward:
+no credit-to-usage spillover integration, no enterprise admin UI, no MRR/ARR
+reporting, no per-user/team usage-breakdown UI — see
+`docs/PHASE-13-REPORT.md` for the complete list.
+
+---
+
+## ADR-0061 — Phase 12 security/reliability hardening: additive MFA (not wired into login), selectively fail-closed rate limiting, a Growth Missions kill switch, and a concrete RLS retrofit design (still not implemented)
+
+**Context.** Phase 12's own brief — 110 sections covering essentially every
+security/reliability domain — required inspecting the existing
+implementation first and hardening only genuine gaps, explicitly forbidding
+a redesign, an AI-runtime/memory/integration-architecture rebuild, or
+replacing the existing authentication architecture "without first proving it
+is necessary." Four parallel audit passes (auth/session/MFA;
+AI/mission safety; infrastructure/ops; tenant-isolation/worker-reliability)
+found: `UserMfaFactor` (Phase 2) was a fully-shaped, 100%-unimplemented data
+model with a settings-page "Coming soon" badge; `checkRateLimit` was
+universally fail-open with no exception anywhere, including the two pure
+credential-guessing surfaces (password login, password-reset) where that is
+a real gap; the crawler had a kill switch (`CRAWLER_HALT`) but Growth
+Missions — which execute the same class of unattended, real, multi-step
+external actions — had none; `scripts/check-tenant-scope.mjs`'s own
+`TENANT_MODELS` allowlist had silently never been updated for 21
+tenant-scoped models introduced across five later phases, meaning the CI
+lint had been checking a shrinking fraction of the real schema the whole
+time; `research/engine.ts` had a non-atomic "check status, then transition"
+race identical in shape to a bug already fixed elsewhere in this codebase;
+and `docs/SECURITY.md` §15 was one paragraph naming five runbook titles with
+zero actual steps.
+
+**Decision.**
+
+1. **MFA is real (hand-rolled RFC 6238 TOTP + recovery codes,
+   `auth/mfa.ts`) but deliberately not wired into the Auth.js sign-in
+   flow.** Restructuring the Credentials provider into a two-step
+   password-then-TOTP exchange is a materially larger, riskier change to an
+   already-audited, live-verified authentication path (staging is real,
+   deployed, and has real users) than this phase's evidence justified
+   without the ability to test a real login flow against the change. MFA
+   instead gates the specific high-risk *actions* the brief's own text
+   calls out ("high-risk organization actions should be able to require
+   stronger authentication"): disabling MFA and regenerating recovery codes
+   now require both a recent real sign-in (the existing `hasRecentAuth`
+   window) **and** a live TOTP/recovery code — the same double-check
+   GitHub/Google use. A full login-flow MFA challenge is recorded as
+   `RISK-AUTH-1` in `docs/SECURITY_POSTURE.md`, not silently dropped.
+2. **Rate-limit fail-closed is opt-in, applied to exactly two call sites,
+   not a global default.** `checkRateLimit` gained a `failClosed` flag.
+   Password login and password-reset-request now fail closed under a Redis
+   outage (an attacker able to knock out Redis must not be handed unlimited
+   guesses as the reward). **Magic-link send deliberately stays fail-open**
+   — it is the sole sign-in *and* recovery path for every passwordless
+   account, so failing closed there would convert a transient Redis blip
+   into a total authentication lockout for that population, a worse outcome
+   than briefly loosening a control that isn't actually guarding a secret
+   (there is nothing to "guess" in an email-send action). This is a
+   deliberate, disclosed trade-off (documented at the call site in
+   `auth/config.ts`), not a mechanical application of "fail closed
+   everywhere."
+3. **Growth Missions get a kill switch mirroring the crawler's exactly**
+   (`MISSIONS_HALT`/`MISSIONS_HALT_ORG_IDS`, `missions/killswitch.ts`),
+   checked in both the scheduled sweep and the manual "run this task now"
+   path — a kill switch a user could route around by clicking a button
+   would not be a real kill switch.
+4. **The tenant-scope lint gap is closed by adding the 21 missing models**,
+   not by redesigning the lint. One genuine violation surfaced
+   (`missions/planner.ts`, a `missionId`-only filter missing
+   `organizationId`) and was fixed directly; one flagged line
+   (`organizations/lifecycle.ts`'s cross-org membership purge during
+   user deletion) is a correct false positive, marked with the linter's own
+   documented opt-out comment rather than incorrectly scoped.
+5. **Postgres RLS remains explicitly deferred, reaffirming ADR-0035/
+   ADR-0052** — the `withOrgScope` choke point those ADRs assumed is still
+   unused, and a safe `FORCE ROW LEVEL SECURITY` retrofit across ~320 call
+   sites plus a second non-owner DB role needs a real database to verify,
+   which this sandbox does not have. The future design, sketched here for
+   the first time rather than left implicit: a `withTenant(organizationId,
+   fn)` wrapper that opens a transaction, runs `SET LOCAL app.current_org =
+   $1`, executes `fn` inside it, and is the **only** path every
+   `packages/services` repository function uses to get a Prisma client —
+   replacing today's direct `prisma.<model>.*` calls. Every tenant table
+   gets `ENABLE ROW LEVEL SECURITY` + `FORCE ROW LEVEL SECURITY` (so even
+   the owner role is bound) with a policy `USING (organization_id =
+   current_setting('app.current_org')::text)`. A second Postgres role
+   without `BYPASSRLS` becomes the app's runtime connection; the existing
+   owner role is retained only for migrations. This is a sketch to unblock
+   a future phase, not an implementation — attempting it without a real
+   database to run `prisma migrate dev` and the isolation suite against
+   would risk exactly the kind of untested, high-blast-radius change this
+   project's own conventions warn against.
+6. **Container hardening (`cap_drop: [ALL]`, `no-new-privileges`) is applied
+   to `docker-compose.production.yml` (a template, never deployed) but
+   deliberately not pushed to the live `docker-compose.staging.yml`** this
+   phase — staging is real, deployed infrastructure this session cannot
+   redeploy or verify against, and an unverified capability-dropping change
+   to a running system is a materially different risk than the same change
+   to a template. `read_only: true` root filesystem is out of scope
+   entirely (Chromium and Next.js runtime writes need verification against
+   a real deployment before that constraint could be safely added).
+7. **Incident response and disaster recovery become real, step-by-step
+   documents** (`docs/INCIDENT-RESPONSE.md`, ten scenarios;
+   `docs/DISASTER-RECOVERY.md`, expanding the existing `docs/DEPLOYMENT.md`
+   §18) rather than one-paragraph outlines — but are explicitly disclosed as
+   **paper exercises, never rehearsed as a live drill**, matching the
+   brief's own prohibition on fabricating a test result that didn't happen.
+8. **No numeric security score anywhere** — `docs/SECURITY_POSTURE.md`
+   classifies each of 18 categories as PASS / PASS WITH CONDITIONS / FAIL /
+   NOT TESTED with a named basis, per the brief's explicit instruction, and
+   states outright that this application is not "fully secure" or
+   "enterprise certified."
+
+**Alternatives considered.**
+
+- *Wire MFA into the login flow this phase.* Rejected — the brief's own
+  "prove it is necessary before replacing the existing authentication
+  architecture" bar wasn't met by an audit alone; the live, verified,
+  password/magic-link/Google flow is exactly the kind of working system the
+  brief said not to touch without strong justification.
+- *Make every rate limit fail closed, including magic-link.* Rejected — see
+  point 2 above; a mechanical "fail closed everywhere" would have traded a
+  bounded abuse risk for an unbounded availability risk on the one auth path
+  with no fallback.
+- *Implement RLS now, accepting it as unverified.* Rejected — a `FORCE RLS`
+  change that silently breaks every unscoped-by-convenience internal query
+  (platform-staff cross-org admin reads, the user-deletion purge this
+  phase's own lint fix found) is exactly the class of change this sandbox's
+  lack of a real database makes too risky to ship without verification.
+- *Push container hardening to staging directly.* Rejected — staging is
+  live, shared infrastructure; a `cap_drop: [ALL]` mistake there is a real
+  outage, not a template correction.
+
+**Consequences.** Five concrete, named, un-hidden risks remain in the risk
+register (`RISK-AUTH-1`, `RISK-ADMIN-1`, `RISK-RLS-1`, `RISK-DR-1`,
+`RISK-IR-1`, plus four more MEDIUM/LOW items) — this phase's job was to
+close what it safely could and disclose the rest precisely, not to reach
+zero remaining risk. `packages/services` grew from 1356 to 1376 tests (a
+net +20, after this phase's own new rate-limit tests exposed and fixed a
+real, latent test-isolation bug — a mutated shared mock never restored
+between tests). `scripts/check-tenant-scope.mjs` now actually covers the
+full tenant-scoped schema instead of a shrinking historical subset.
+
+---
+
 ## ADR-0060 — Memory, Research & Knowledge Intelligence: a new typed knowledge layer above the untouched `OrgMemory`/`MissionLearning`, a real OpenAI-only embedding provider with keyword-first hybrid retrieval, and URL-driven (not search-driven) research, all dispatched through the existing Tool Registry/Policy Engine
 
 **Context.** Phase 11 asked for organization/mission memory, a research

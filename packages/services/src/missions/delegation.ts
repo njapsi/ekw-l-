@@ -18,6 +18,7 @@ import { listToolMetadata } from '../agent/tool-registry.js';
 import { startCrawl } from '../seo/jobs.js';
 import { listWebsites } from '../seo/read.js';
 import { runSeoAgent } from '../seo/agent.js';
+import { enforceAiBudget } from '../usage/ai-budget.js';
 
 export interface DelegationResult {
   /** Whether the underlying call succeeded outright, is now pending human
@@ -167,6 +168,11 @@ async function delegateSeoTask(
     return { outcome: 'failed', summary: 'No completed crawl exists yet to analyze.' };
   }
   try {
+    // Part 19/53: a mission task that would spend AI budget checks the
+    // org's real, current meter state first — an autonomous mission must
+    // stop generating AI cost once the org's plan is exhausted, not only
+    // once its own (separate) `maxToolCalls` ceiling is hit.
+    await enforceAiBudget({ organizationId: input.organizationId, db });
     const res = await runSeoAgent(
       { db },
       {

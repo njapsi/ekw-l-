@@ -59,7 +59,18 @@ export async function runResearchProject(
   const project = await db.researchProject.findFirst({ where: { id: researchProjectId, organizationId } });
   if (!project || project.status !== 'REQUESTED') return;
 
-  await transition(researchProjectId, 'PLANNING', db, { startedAt: new Date() });
+  // Phase 12 hardening: claim the project with a conditional `updateMany`
+  // instead of the plain `findFirst`-then-`update` this used to be. Without
+  // this, an overlapping `research-dispatch-sweep` tick (no per-project
+  // lock) or a manual `runResearchProjectJob` racing the sweep could both
+  // pass the `status !== 'REQUESTED'` check above before either wrote
+  // `PLANNING`, running the whole fetch/citation/usage-recording pipeline
+  // twice for the same project.
+  const claim = await db.researchProject.updateMany({
+    where: { id: researchProjectId, organizationId, status: 'REQUESTED' },
+    data: { status: 'PLANNING', startedAt: new Date() },
+  });
+  if (claim.count === 0) return;
   const config = (project.config as { seedUrls?: string[]; maxSources?: number } | null) ?? {};
   const maxSources = Math.min(config.maxSources ?? 5, MAX_SOURCES_CEILING);
   const seedUrls = (config.seedUrls ?? []).slice(0, maxSources);

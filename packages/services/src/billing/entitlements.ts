@@ -14,6 +14,7 @@ import { recordAudit } from '../audit/index.js';
 import { runInTransaction } from '../db-tx.js';
 import { AppError } from '../errors.js';
 import { type MeterKey, USAGE_METERS, limitKey } from '../usage/meters.js';
+import { getActiveEnterpriseContract, type CustomEntitlements } from './enterprise.js';
 import { type FeatureKey, getPlan } from './plans.js';
 
 const FEATURE_KEYS: FeatureKey[] = [
@@ -96,19 +97,30 @@ function isLive(row: { expiresAt: Date | null }, now: Date): boolean {
 
 /**
  * The effective limits + features for an org. Reads the org's tier from its
- * `Subscription` (defaulting to FREE) and overlays live override rows.
+ * `Subscription` (defaulting to FREE), overlays an active enterprise
+ * contract (Phase 13, §46 — a contract sits above the plan default but
+ * below a per-key OVERRIDE/PROMO row), then overlays live override rows.
  */
 export async function resolveEntitlements(
   organizationId: string,
   db: Db = prisma,
   now: Date = new Date(),
 ): Promise<ResolvedEntitlements> {
-  const [sub, rows] = await Promise.all([
+  const [sub, rows, contract] = await Promise.all([
     db.subscription.findUnique({
       where: { organizationId },
       select: { tier: true, currentPeriodStart: true, currentPeriodEnd: true },
     }),
     db.entitlement.findMany({ where: { organizationId } }),
+    // `enterpriseContract` is a Phase 13 addition; several existing test
+    // suites construct their own minimal hand-rolled `db` fake predating
+    // it (rather than the shared `testing/memory-db.ts` harness) and don't
+    // define this model at all. Treat "no such model on this db" the same
+    // as "no contract" instead of throwing — this function is called from
+    // many places (`checkUsage`, `recordUsage`, every usage summary) that
+    // have nothing to do with enterprise contracts and shouldn't need to
+    // know about them to keep working.
+    getActiveEnterpriseContract(organizationId, db, now).catch(() => null),
   ]);
   const tier: BillingTier = sub?.tier ?? 'FREE';
   const plan = getPlan(tier);
@@ -117,6 +129,25 @@ export async function resolveEntitlements(
   for (const meter of USAGE_METERS) limits[meter] = plan.limits[meter];
   const features = { ...plan.features };
   const overridden: string[] = [];
+
+  if (contract) {
+    const custom = contract.customEntitlements as CustomEntitlements;
+    for (const [key, value] of Object.entries(custom)) {
+      if (key.startsWith('limit:')) {
+        const meter = key.slice('limit:'.length) as MeterKey;
+        if ((USAGE_METERS as readonly string[]).includes(meter)) {
+          limits[meter] = value == null ? null : Number(value);
+          overridden.push(key);
+        }
+      } else if (key.startsWith('feature:')) {
+        const f = key.slice('feature:'.length) as FeatureKey;
+        if (FEATURE_KEYS.includes(f) && typeof value === 'boolean') {
+          features[f] = value;
+          overridden.push(key);
+        }
+      }
+    }
+  }
 
   for (const row of rows) {
     if (row.source === 'PLAN' || !isLive(row, now)) continue;

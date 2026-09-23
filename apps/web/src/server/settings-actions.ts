@@ -4,12 +4,18 @@ import { revalidatePath } from 'next/cache';
 import { headers } from 'next/headers';
 import { apiKeys, governance, organizations, security, users } from '@growth-agent/services';
 import {
+  confirmMfaEnrollment,
+  disableMfa,
+  getMfaStatus,
   listUserSessions,
+  regenerateRecoveryCodes,
   revokeOtherSessions,
   revokeSessionByHandle,
   signIn,
   signOut,
+  startMfaEnrollment,
   updateSession,
+  verifyMfaCode,
 } from '@growth-agent/services/auth';
 import { hasRecentAuth, requireActiveOrg, requirePermission, requireUser } from '@/lib/auth';
 import { toActionError } from '@/lib/action-error';
@@ -238,6 +244,81 @@ export async function revokeOtherSessionsAction(): Promise<ActionResult> {
       ok: true,
       message: `Signed out ${n} other session${n === 1 ? '' : 's'} (and any older sign-ins).`,
     };
+  } catch (e) {
+    return toActionError(e);
+  }
+}
+
+// --- Multi-factor authentication (Phase 12) ------------------------------------
+
+export async function getMfaStatusAction() {
+  const user = await requireUser();
+  return getMfaStatus(user.id);
+}
+
+export async function startMfaEnrollmentAction(): Promise<
+  ActionResult & { factorId?: string; secret?: string; otpauthUri?: string }
+> {
+  try {
+    const user = await requireUser();
+    const rl = await limited(`mfa-enroll:${user.id}`, 10, 3600);
+    if (rl) return rl;
+    const started = await startMfaEnrollment(user.id, user.email);
+    return { ok: true, ...started };
+  } catch (e) {
+    return toActionError(e);
+  }
+}
+
+export async function confirmMfaEnrollmentAction(input: {
+  factorId: string;
+  code: string;
+}): Promise<ActionResult & { recoveryCodes?: string[] }> {
+  try {
+    const user = await requireUser();
+    const rl = await limited(`mfa-confirm:${user.id}`, 10, 3600);
+    if (rl) return rl;
+    const { recoveryCodes } = await confirmMfaEnrollment(user.id, input.factorId, input.code);
+    refreshSettings();
+    return { ok: true, recoveryCodes, message: 'Two-factor authentication is now on.' };
+  } catch (e) {
+    return toActionError(e);
+  }
+}
+
+/** Disabling 2FA needs both a recent real sign-in *and* proof the caller still
+ *  holds the second factor (a live code or an unused recovery code) — the same
+ *  double-check GitHub/Google use, so a hijacked session with a stale cookie
+ *  can't silently turn protection off. */
+export async function disableMfaAction(input: { code: string }): Promise<ActionResult> {
+  try {
+    const user = await requireUser();
+    if (!(await hasRecentAuth())) return REAUTH;
+    const rl = await limited(`mfa-disable:${user.id}`, 10, 3600);
+    if (rl) return rl;
+    const check = await verifyMfaCode(user.id, input.code);
+    if (!check.ok) return { ok: false, error: 'That code is incorrect.' };
+    await disableMfa(user.id);
+    refreshSettings();
+    return { ok: true, message: 'Two-factor authentication is off.' };
+  } catch (e) {
+    return toActionError(e);
+  }
+}
+
+export async function regenerateRecoveryCodesAction(input: {
+  code: string;
+}): Promise<ActionResult & { recoveryCodes?: string[] }> {
+  try {
+    const user = await requireUser();
+    if (!(await hasRecentAuth())) return REAUTH;
+    const rl = await limited(`mfa-recovery:${user.id}`, 10, 3600);
+    if (rl) return rl;
+    const check = await verifyMfaCode(user.id, input.code);
+    if (!check.ok) return { ok: false, error: 'That code is incorrect.' };
+    const recoveryCodes = await regenerateRecoveryCodes(user.id);
+    refreshSettings();
+    return { ok: true, recoveryCodes, message: 'New recovery codes generated. The old ones no longer work.' };
   } catch (e) {
     return toActionError(e);
   }

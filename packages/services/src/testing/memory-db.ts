@@ -23,10 +23,22 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 }
 
 function cmp(a: unknown, b: unknown): number {
-  const av = a instanceof Date ? a.getTime() : (a as number | string);
-  const bv = b instanceof Date ? b.getTime() : (b as number | string);
+  const av = a instanceof Date ? a.getTime() : (a as number | string | bigint);
+  const bv = b instanceof Date ? b.getTime() : (b as number | string | bigint);
   if (av === bv) return 0;
-  return av < bv ? -1 : 1;
+  // `===` never considers a Number and a BigInt of the same magnitude equal
+  // (`4 === 4n` is `false`), even though `<`/`>` compare them correctly by
+  // value. Falling straight to `av < bv ? -1 : 1` after a failed `===`
+  // therefore misreports an exactly-equal Number/BigInt pair as "greater
+  // than" — a real, previously-latent bug this harness's own `used:
+  // {increment}` (which silently converts a BigInt counter to a plain
+  // Number, see `applyOps` below) turns into a live off-by-one: a `{lte:
+  // 5n}` boundary check on a counter that is legitimately at exactly 5
+  // (stored as the Number `5`) wrongly rejects instead of matching. Check
+  // ordering explicitly instead of assuming not-less-than means greater.
+  if (av < bv) return -1;
+  if (av > bv) return 1;
+  return 0;
 }
 
 function eq(a: unknown, b: unknown): boolean {
@@ -112,11 +124,20 @@ export function matches(row: Row, where: Where | undefined): boolean {
 function applyOps(row: Row, data: Row): Row {
   const out: Row = {};
   for (const [k, v] of Object.entries(data)) {
-    if (isPlainObject(v) && typeof v.increment === 'number')
-      out[k] = Number(row[k] ?? 0) + v.increment;
-    else if (isPlainObject(v) && typeof v.decrement === 'number')
-      out[k] = Number(row[k] ?? 0) - v.decrement;
-    else out[k] = v;
+    const current = row[k];
+    // A real Prisma `BigInt` column stays a `bigint` through an
+    // increment/decrement; silently widening it to a `Number` here (the
+    // previous behavior) let a later `{lte: 5n}`-style filter compare a
+    // Number against a BigInt, which `cmp()` above can get wrong at an
+    // exact-equality boundary. Preserve the field's own type instead of
+    // always producing a `Number`.
+    if (isPlainObject(v) && typeof v.increment === 'number') {
+      out[k] = typeof current === 'bigint' ? current + BigInt(v.increment) : Number(current ?? 0) + v.increment;
+    } else if (isPlainObject(v) && typeof v.decrement === 'number') {
+      out[k] = typeof current === 'bigint' ? current - BigInt(v.decrement) : Number(current ?? 0) - v.decrement;
+    } else {
+      out[k] = v;
+    }
   }
   return out;
 }
@@ -244,6 +265,36 @@ function model(name: string, defaults: () => Row): MemoryModel {
   return m;
 }
 
+/**
+ * `model()` doesn't know a schema's `@unique` constraints, so by default two
+ * rows with the same value for a supposedly-unique field can both be
+ * created — unlike real Prisma, which throws `P2002`. Most tests either
+ * don't hit that path or use their own hand-rolled fixture that checks it
+ * explicitly; this wraps a shared-harness model's `create` to enforce one
+ * real unique field, throwing the same `{code:'P2002'}` shape production
+ * code's own `isUniqueViolation`-style checks already look for.
+ */
+function withUniqueField(m: MemoryModel, field: string): MemoryModel {
+  return withUniqueFields(m, [field]);
+}
+
+/** Same as `withUniqueField`, for a compound unique key (`@@unique([a, b])`). */
+function withUniqueFields(m: MemoryModel, fields: string[]): MemoryModel {
+  return {
+    ...m,
+    create: async (args: { data: Row }) => {
+      if (m.rows.some((r) => fields.every((f) => eq(r[f], args.data[f])))) {
+        const err = new Error(`Unique constraint failed on the fields: (\`${fields.join('`, `')}\`)`) as Error & {
+          code: string;
+        };
+        err.code = 'P2002';
+        throw err;
+      }
+      return m.create(args);
+    },
+  };
+}
+
 export function createMemoryDb() {
   const db = {
     wordPressSite: model('wps', () => ({
@@ -324,6 +375,17 @@ export function createMemoryDb() {
     })),
     userSession: model('ses', () => ({ revokedAt: null, revokedReason: null })),
     securityEvent: model('sev', () => ({ severity: 'INFO' })),
+    userMfaFactor: model('mfa', () => ({
+      label: null,
+      secretCipher: null,
+      secretIv: null,
+      secretAuthTag: null,
+      keyId: null,
+      credentialId: null,
+      publicKey: null,
+      signCount: null,
+      lastUsedAt: null,
+    })),
     apiKey: model('key', () => ({
       lastUsedAt: null,
       expiresAt: null,
@@ -331,6 +393,66 @@ export function createMemoryDb() {
       revokedById: null,
     })),
     automationRule: model('atr', () => ({})),
+    // Phase 13 — Billing.
+    subscription: model('sub', () => ({
+      tier: 'FREE',
+      status: 'ACTIVE',
+      interval: 'MONTH',
+      seats: 1,
+      stripeCustomerId: null,
+      stripeSubscriptionId: null,
+      stripePriceId: null,
+      currentPeriodStart: null,
+      currentPeriodEnd: null,
+      cancelAtPeriodEnd: false,
+      canceledAt: null,
+      trialEndsAt: null,
+    })),
+    entitlement: model('ent', () => ({
+      limitValue: null,
+      boolValue: null,
+      source: 'PLAN',
+      note: null,
+      createdById: null,
+      expiresAt: null,
+    })),
+    usageRecord: withUniqueField(
+      model('usr', () => ({
+        actorId: null,
+        subjectType: null,
+        subjectId: null,
+        costUsd: null,
+        metadata: null,
+        occurredAt: new Date(),
+      })),
+      'idempotencyKey',
+    ),
+    usageCounter: withUniqueFields(
+      model('usc', () => ({ used: BigInt(0), limitValue: null })),
+      ['organizationId', 'meter', 'periodStart'],
+    ),
+    invoice: model('inv2', () => ({
+      number: null,
+      amountDue: 0,
+      amountPaid: 0,
+      amountRemaining: 0,
+      currency: 'usd',
+      hostedInvoiceUrl: null,
+      invoicePdfUrl: null,
+      periodStart: null,
+      periodEnd: null,
+      issuedAt: null,
+    })),
+    billingEvent: model('bev', () => ({ status: 'RECEIVED', error: null, processedAt: null })),
+    creditTransaction: model('crt', () => ({ source: null, referenceId: null, actorId: null })),
+    enterpriseContract: model('ent2', () => ({
+      status: 'ACTIVE',
+      contractEnd: null,
+      seatLimit: null,
+      billingTerms: null,
+      supportLevel: null,
+      createdById: null,
+    })),
     // Phase 10 — Growth Missions.
     growthMission: model('gmi', () => ({
       status: 'DRAFT',
@@ -463,6 +585,123 @@ export function createMemoryDb() {
     researchFinding: model('rsf', () => ({ sourceId: null, confidence: 0.5, conflictsWithFindingId: null })),
     researchCitation: model('rsc', () => ({ findingId: null, quote: null })),
   };
+
+  /**
+   * Real rollback-on-throw, matching Prisma's interactive `$transaction`
+   * (`db-tx.ts::runInTransaction` calls this when it's present). Added for
+   * Phase 13's atomic usage-reservation logic, whose correctness depends on
+   * "a rejected claim leaves no trace" — a real, permanent, reusable
+   * capability for any future test that needs to prove a `try { ... } catch
+   * { rollback }` code path, not a one-off.
+   *
+   * This must undo only the rows *this* transaction itself touched, each
+   * restored to its value from just before this transaction first touched
+   * it — never a wholesale "restore every model to how it looked when this
+   * transaction started" snapshot. Two callers can have transactions
+   * in-flight at once (interleaved across `await` points, exactly like two
+   * concurrent requests hitting real Postgres), and a wholesale snapshot
+   * taken when transaction A started would predate transaction B's
+   * meanwhile-committed writes — rolling A back would then silently erase
+   * B's legitimate, already-committed changes. A first version of this had
+   * exactly that bug: it corrupted a concurrent-reservation test (10
+   * requests racing 5 units of capacity landed 4, not 5, because a
+   * rejected 6th reservation's rollback wiped out a 5th one that had
+   * already succeeded in the interim).
+   */
+  (db as unknown as { $transaction: <T>(fn: (tx: typeof db) => Promise<T>) => Promise<T> }).$transaction = async <
+    T,
+  >(
+    fn: (tx: typeof db) => Promise<T>,
+  ): Promise<T> => {
+    // For each model, the first-seen pre-transaction value of every row this
+    // transaction mutates, or `undefined` for a row this transaction itself
+    // created (⇒ rollback deletes it). Recorded lazily, once per row, before
+    // the real mutation runs.
+    const journal = new Map<MemoryModel, Map<string, Row | undefined>>();
+    const journalFor = (m: MemoryModel) => {
+      let j = journal.get(m);
+      if (!j) {
+        j = new Map();
+        journal.set(m, j);
+      }
+      return j;
+    };
+    const remember = (m: MemoryModel, id: string) => {
+      const j = journalFor(m);
+      if (j.has(id)) return; // keep the oldest (genuinely pre-transaction) snapshot
+      const row = m.rows.find((r) => r.id === id);
+      j.set(id, row ? { ...row } : undefined);
+    };
+
+    const tx: typeof db = { ...db };
+    for (const [key, m] of Object.entries(db)) {
+      if (!m || typeof m !== 'object' || !Array.isArray(m.rows)) continue;
+      const real = m;
+      const wrapped: MemoryModel = {
+        rows: real.rows,
+        findUnique: (args) => real.findUnique(args),
+        findFirst: (args) => real.findFirst(args),
+        findMany: (args) => real.findMany(args),
+        count: (args) => real.count(args),
+        create: async (args) => {
+          const row = await real.create(args);
+          // Didn't exist before this transaction touched it ⇒ delete on
+          // rollback. Must set this directly rather than via `remember` —
+          // by now the row already exists in `real.rows`, so `remember`'s
+          // own lookup would (wrongly) capture the new row as if it were
+          // the pre-transaction state instead of recording "no prior row".
+          const j = journalFor(real);
+          if (!j.has(row.id as string)) j.set(row.id as string, undefined);
+          return row;
+        },
+        update: async (args) => {
+          const before = real.rows.find((r) => matches(r, args.where));
+          if (before) remember(real, before.id as string);
+          return real.update(args);
+        },
+        updateMany: async (args) => {
+          for (const r of real.rows.filter((r) => matches(r, args.where))) remember(real, r.id as string);
+          return real.updateMany(args);
+        },
+        upsert: async (args) => {
+          const before = real.rows.find((r) => matches(r, args.where));
+          if (before) remember(real, before.id as string);
+          const row = await real.upsert(args);
+          if (!before) journalFor(real).set(row.id as string, undefined);
+          return row;
+        },
+        delete: async (args) => {
+          const before = real.rows.find((r) => matches(r, args.where));
+          if (before) remember(real, before.id as string);
+          return real.delete(args);
+        },
+        deleteMany: async (args = {}) => {
+          for (const r of real.rows.filter((r) => matches(r, args.where))) remember(real, r.id as string);
+          return real.deleteMany(args);
+        },
+      };
+      (tx as unknown as Record<string, unknown>)[key] = wrapped;
+    }
+
+    try {
+      return await fn(tx);
+    } catch (err) {
+      for (const [m, rowsById] of journal) {
+        for (const [id, before] of rowsById) {
+          const i = m.rows.findIndex((r) => r.id === id);
+          if (before === undefined) {
+            if (i >= 0) m.rows.splice(i, 1); // this transaction created it — remove it
+          } else if (i >= 0) {
+            m.rows[i] = before; // restore this row's pre-transaction value
+          } else {
+            m.rows.push(before); // this transaction deleted it — bring it back
+          }
+        }
+      }
+      throw err;
+    }
+  };
+
   return db;
 }
 

@@ -5,6 +5,7 @@ import { observability } from '@growth-agent/services';
 import { logger } from './logger.js';
 import { type AgentJob, processAgentJob } from './processors/agent.js';
 import { type AutomationJob, processAutomationJob } from './processors/automation.js';
+import { type BillingJob, processBillingJob } from './processors/billing.js';
 import { type ContentJob, processContentJob } from './processors/content.js';
 import { type IntegrationsJob, processIntegrationsJob } from './processors/integrations.js';
 import { type ReportJob, processReportJob } from './processors/report.js';
@@ -14,7 +15,14 @@ import { type TikTokJob, processTikTokJob } from './processors/tiktok.js';
 import { type YouTubeJob, processYouTubeJob } from './processors/youtube.js';
 import { startHealthServer } from './health-server.js';
 import { instrumentJob, startHeartbeat } from './observability.js';
-import { QUEUE_NAMES, agentRunQueue, automationQueue, connection, integrationsQueue } from './queues.js';
+import {
+  QUEUE_NAMES,
+  agentRunQueue,
+  automationQueue,
+  billingQueue,
+  connection,
+  integrationsQueue,
+} from './queues.js';
 
 /**
  * Worker entrypoint. The YouTube, TikTok, SEO, Growth Agent, content-pipeline,
@@ -37,6 +45,7 @@ const PROCESSORS: Record<string, Processor> = {
   [QUEUE_NAMES.report]: (job) => processReportJob(job as Job<ReportJob>),
   [QUEUE_NAMES.automation]: (job) => processAutomationJob(job as Job<AutomationJob>),
   [QUEUE_NAMES.integrations]: (job) => processIntegrationsJob(job as Job<IntegrationsJob>),
+  [QUEUE_NAMES.billing]: (job) => processBillingJob(job as Job<BillingJob>),
 };
 
 /** Register the repeatable scheduler ticks (idempotent — keyed job ids). */
@@ -139,8 +148,26 @@ async function registerSchedules(): Promise<void> {
     { type: 'memory.expire' },
     { repeat: { every: 86_400_000 }, jobId: 'memory-expire', removeOnComplete: 10, removeOnFail: 10 },
   );
+  // Phase 13: billing reconciliation + usage alerts + trial-ending notices.
+  // Reconcile hits the Stripe API per org with a subscription, so it runs
+  // far less often than the sub-minute sweeps above (§93).
+  await billingQueue.add(
+    'reconcile',
+    { type: 'reconcile' },
+    { repeat: { every: 6 * 3_600_000 }, jobId: 'billing-reconcile', removeOnComplete: 20, removeOnFail: 20 },
+  );
+  await billingQueue.add(
+    'usage-alerts',
+    { type: 'usage-alerts' },
+    { repeat: { every: 15 * 60_000 }, jobId: 'billing-usage-alerts', removeOnComplete: 50, removeOnFail: 50 },
+  );
+  await billingQueue.add(
+    'trial-ending',
+    { type: 'trial-ending' },
+    { repeat: { every: 6 * 3_600_000 }, jobId: 'billing-trial-ending', removeOnComplete: 20, removeOnFail: 20 },
+  );
   logger.info(
-    'automation + lifecycle + integration + mission + knowledge/research scheduler ticks registered',
+    'automation + lifecycle + integration + mission + knowledge/research + billing scheduler ticks registered',
   );
 }
 
@@ -173,6 +200,7 @@ async function shutdown(signal: string) {
   await automationQueue.close();
   await integrationsQueue.close();
   await agentRunQueue.close();
+  await billingQueue.close();
   await closeSeoRenderer();
   await observability.closeObservabilityQueues();
   await observability.closeObservabilityRedis();

@@ -5,6 +5,7 @@ import type { NextAuthConfig } from 'next-auth';
 import { recordAudit } from '../audit/index.js';
 import { ensurePersonalOrganization } from '../organizations/index.js';
 import { checkRateLimit } from '../security/rate-limit.js';
+import { recordSecurityEvent } from '../security/events.js';
 import { applyIdentityToToken, tokenToSessionUser } from './callbacks.js';
 import { currentRequestContext } from './request-context.js';
 import { authMethodFor, createUserSession, endSession } from './sessions.js';
@@ -60,6 +61,22 @@ export const authConfig: NextAuthConfig = {
      * addresses without limit (bombing + sender-reputation abuse). Returning
      * `false` aborts before the link is generated or sent. OAuth / credentials
      * sign-ins are unaffected. The limiter fails open if Redis is down.
+     *
+     * Phase 12 §34 asked every credential-guessing surface (login,
+     * password-reset, magic-link) to fail closed under a Redis outage. This
+     * one deliberately stays fail-open: unlike password login (which has a
+     * fallback — the account can still request a magic link) or
+     * password-reset-request (which never signals success/failure either
+     * way), magic-link IS the sole sign-in and account-recovery path for
+     * every passwordless account and the failsafe for everyone else
+     * (docs/QA.md: "password recovery — no passwords — magic link is the
+     * recovery path" predates password auth but the passwordless population
+     * it describes still exists). Failing closed here would turn a
+     * transient Redis blip into a total authentication lockout for those
+     * users — a worse outcome than briefly loosening a send-abuse control
+     * that Redis being down doesn't actually expose to unlimited guessing
+     * (there is no secret being guessed here, only an address being
+     * emailed).
      */
     async signIn({ user, email }) {
       if (!email?.verificationRequest) return true;
@@ -74,6 +91,14 @@ export const authConfig: NextAuthConfig = {
         log.warn({ email: address }, 'magic-link send rate-limited');
         return false;
       }
+      const ctx = currentRequestContext();
+      await recordSecurityEvent({
+        userId: user?.id ?? null,
+        type: 'MAGIC_LINK_REQUESTED',
+        ip: ctx.ip,
+        userAgent: ctx.userAgent,
+        metadata: { email: address },
+      });
       return true;
     },
     async jwt({ token, user, trigger, account }) {

@@ -6,6 +6,7 @@ import {
   integrationSync,
   integrations,
   isAppError,
+  rbac,
   security,
   usage,
   wordpress,
@@ -298,7 +299,7 @@ export async function cancelApprovalAction(requestId: string): Promise<ActionRes
       organizationId: ctx.org.id,
       userId: ctx.user.id,
       requestId,
-      isAdmin: ctx.org.role === 'ADMIN' || ctx.org.role === 'OWNER',
+      isAdmin: rbac.roleHasPermission(ctx.org.role, 'approval.cancel_others'),
     });
     refresh();
     return { ok: true, message: 'Request cancelled.' };

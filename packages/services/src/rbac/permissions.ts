@@ -67,6 +67,7 @@ export const PERMISSIONS = [
   'memory.manage',
   'research.view',
   'research.run',
+  'approval.cancel_others',
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
@@ -144,6 +145,12 @@ const ADMIN: Permission[] = [
   'api_key.view',
   'api_key.create',
   'api_key.revoke',
+  // Phase 12 — centralizes the ad hoc `role === 'ADMIN' || role === 'OWNER'`
+  // check `cancelApprovalAction` used to make inline against a raw role
+  // string. Cancelling your own pending approval needs no special
+  // permission (any requester may withdraw their own request); cancelling
+  // someone else's is an admin-level override.
+  'approval.cancel_others',
 ];
 
 const OWNER: Permission[] = [

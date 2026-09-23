@@ -100,6 +100,22 @@ const redis = (v) => {
   if (!/^rediss?:\/\//.test(v)) return 'must be a redis:// / rediss:// URL';
   if (STRICT_HTTPS && v.startsWith('redis://'))
     return 'must use TLS (rediss://) in production (use --allow-insecure for staging)';
+  // Phase 12: an unauthenticated Redis is a real, common misconfiguration —
+  // Redis has no auth by default, and this instance holds rate-limit
+  // counters, the crawl frontier, job queues, and cache. Require userinfo
+  // (a password, with or without a username) in the URL when strict, same
+  // escape hatch as the TLS check above.
+  if (STRICT_HTTPS) {
+    let hasAuth = false;
+    try {
+      hasAuth = new URL(v).password.length > 0;
+    } catch {
+      hasAuth = false;
+    }
+    if (!hasAuth) {
+      return 'must include a password (redis[s]://:password@host) in production (use --allow-insecure for staging)';
+    }
+  }
   return null;
 };
 const oneOf = (list) => (v) => (list.includes(v) ? null : `must be one of: ${list.join(', ')}`);

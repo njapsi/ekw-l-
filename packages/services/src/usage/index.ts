@@ -10,6 +10,13 @@ export { checkUsage, type UsageVerdict, type CheckUsageInput } from './check.js'
 export { recordUsage, type RecordUsageInput, type RecordUsageResult } from './record.js';
 export { enforceUsage, guardUsage, UsageLimitError, type EnforceUsageInput } from './enforce.js';
 export {
+  reserveUsage,
+  releaseUsageReservation,
+  type ReserveUsageInput,
+  type ReserveUsageResult,
+  type ReleaseUsageInput,
+} from './reserve.js';
+export {
   getUsageSummary,
   refreshUsageCounters,
   type UsageSummary,

@@ -1,7 +1,27 @@
-import { describe, expect, it, beforeEach } from 'vitest';
+import { describe, expect, it, beforeEach, vi } from 'vitest';
 import type { Db } from '@growth-agent/db';
 import { createMemoryDb, type MemoryDb } from '../testing/memory-db.js';
-import {
+
+// `planMission` calls `checkRateLimit` (Phase 12's replan throttle), which
+// otherwise attempts a real Redis connection with a 3s `connectTimeout`
+// before falling back open — harmless in production (Redis is actually
+// there), but in a test environment with no Redis this made every test
+// that plans a mission occasionally exceed vitest's 5s default timeout
+// under system load (reproduced repeatedly as a "flaky" failure before
+// this was root-caused). Mock the client the same way
+// `security/rate-limit.test.ts` already does, so tests never depend on
+// real network behavior.
+const fakeRedis = {
+  status: 'ready' as string,
+  connect: vi.fn(async () => undefined),
+  incr: vi.fn(async () => 1),
+  expire: vi.fn(async () => 1),
+};
+vi.mock('../observability/redis.js', () => ({
+  getObservabilityRedis: () => fakeRedis,
+}));
+
+const {
   activateMission,
   cancelMission,
   createMission,
@@ -9,7 +29,7 @@ import {
   pauseMission,
   planMission,
   resumeMission,
-} from './crud.js';
+} = await import('./crud.js');
 
 let db: MemoryDb;
 let asDb: Db;

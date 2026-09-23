@@ -113,6 +113,32 @@ describe('runResearchProject', () => {
     expect(researchFetchMock).not.toHaveBeenCalled();
   });
 
+  it('two concurrent runs of the same REQUESTED project only execute the pipeline once (Phase 12 claim hardening)', async () => {
+    researchFetchMock.mockResolvedValue({
+      ok: true,
+      citation: {
+        sourceUrl: 'https://example.com/a',
+        title: 'A',
+        retrievedAt: new Date().toISOString(),
+        excerpt: 'Real content.',
+        excerptTruncated: false,
+        contentHash: 'x',
+      },
+    });
+    const project = await makeProject({ seedUrls: ['https://example.com/a'], maxSources: 1 });
+    const { runResearchProject } = await import('./engine.js');
+    // Both calls observe REQUESTED before either claims it — this is exactly
+    // the race an unclaimed dispatch sweep used to allow.
+    await Promise.all([
+      runResearchProject('org_1', project.id, { db: asDb }),
+      runResearchProject('org_1', project.id, { db: asDb }),
+    ]);
+    // Exactly one run's worth of fetches/findings/citations exists — never two.
+    expect(researchFetchMock).toHaveBeenCalledTimes(1);
+    expect(db.researchFinding.rows).toHaveLength(1);
+    expect(db.researchCitation.rows).toHaveLength(1);
+  });
+
   it('never fabricates a conclusion when no model is configured — findings only', async () => {
     researchFetchMock.mockResolvedValue({
       ok: true,

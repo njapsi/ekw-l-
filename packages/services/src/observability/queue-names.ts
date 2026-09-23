@@ -13,6 +13,11 @@ export const QUEUE_NAMES = {
   contentPipeline: 'content-pipeline',
   automation: 'automation',
   integrations: 'integrations',
+  /** Phase 13 — nightly Stripe reconciliation + usage-counter rollup +
+   *  trial expiry. `runBillingReconcileJob`/`rebuildUsageCountersJob`
+   *  (`billing/jobs.ts`) existed since Phase 10 but were never wired to run
+   *  on a schedule — this queue is what actually calls them. */
+  billing: 'billing',
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
@@ -28,4 +33,5 @@ export const QUEUE_ORDER: readonly QueueName[] = [
   QUEUE_NAMES.contentPipeline,
   QUEUE_NAMES.automation,
   QUEUE_NAMES.integrations,
+  QUEUE_NAMES.billing,
 ];

@@ -73,6 +73,41 @@ const TENANT_MODELS = new Set([
   'researchQuery',
   'researchFinding',
   'researchCitation',
+  // Phase 12 — closed a real gap: these tenant-scoped models (Phases 1, 2, 5,
+  // 6-10) were never added to this allowlist, so every query against them
+  // was silently unchecked by this lint the whole time. `securityEvent` and
+  // `errorEvent` are deliberately NOT added — both are documented as
+  // person-/platform-centric and legitimately queried across organizations
+  // (see their own schema doc comments).
+  'agentRunEvent',
+  'aiGovernancePolicy',
+  'apiKey',
+  'auditLog',
+  'growthMission',
+  'integrationActionRequest',
+  'integrationSyncRun',
+  'invitation',
+  'mcpServer',
+  'mcpServerTool',
+  'membership',
+  'missionEvent',
+  'missionLearning',
+  'missionMetric',
+  'missionMilestone',
+  'missionTask',
+  'tikTokContentPlan',
+  'tikTokExperiment',
+  'tikTokOpportunity',
+  'wordPressContent',
+  'wordPressSite',
+  'youTubeCalendarEntry',
+  'youTubeExperiment',
+  'youTubeOpportunity',
+  // Phase 13 — new tenant-scoped billing models, added at the same time
+  // they were introduced (learning from Phase 12's own gap: don't let a
+  // new model go unchecked from the start).
+  'creditTransaction',
+  'enterpriseContract',
 ]);
 
 const RISKY = 'findMany|findFirst|updateMany|deleteMany|aggregate|groupBy|count';

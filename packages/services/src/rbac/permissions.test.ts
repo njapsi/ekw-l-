@@ -128,6 +128,14 @@ describe('role matrix', () => {
     expect(can('MANAGER', 'content.publish')).toBe(false);
     expect(can('MEMBER', 'content.publish')).toBe(false);
   });
+
+  it('only OWNER and ADMIN may cancel someone else\'s pending approval (Phase 12: centralizes what was an inline ADMIN/OWNER role check)', () => {
+    expect(can('OWNER', 'approval.cancel_others')).toBe(true);
+    expect(can('ADMIN', 'approval.cancel_others')).toBe(true);
+    expect(can('MANAGER', 'approval.cancel_others')).toBe(false);
+    expect(can('MEMBER', 'approval.cancel_others')).toBe(false);
+    expect(can('VIEWER', 'approval.cancel_others')).toBe(false);
+  });
 });
 
 describe('checkRoleChange (no privilege escalation)', () => {

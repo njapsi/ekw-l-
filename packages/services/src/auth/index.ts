@@ -34,3 +34,15 @@ export {
 } from './sessions.js';
 export { registerWithPassword, type SignUpOutcome } from './signup.js';
 export { authMethodFor, sessionHandle, SESSION_ABSOLUTE_MS } from './sessions.js';
+export {
+  startMfaEnrollment,
+  confirmMfaEnrollment,
+  verifyMfaCode,
+  disableMfa,
+  hasMfaEnabled,
+  getMfaStatus,
+  regenerateRecoveryCodes,
+  totpUri,
+  type StartMfaEnrollmentResult,
+  type MfaStatus,
+} from './mfa.js';

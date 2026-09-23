@@ -18,10 +18,21 @@ async function requestCtx() {
   return { ip: security.clientIpFrom(h), userAgent: h.get('user-agent') };
 }
 
-/** Per-IP throttle for unauthenticated auth forms (Part 31). Fails open with Redis down. */
-async function ipLimited(bucket: string, limit: number, windowSec: number): Promise<boolean> {
+/**
+ * Per-IP throttle for unauthenticated auth forms (Part 31). Fails open with
+ * Redis down, except for `failClosed` credential-guessing surfaces
+ * (password-reset request — Phase 12 §34), which fail closed instead: an
+ * attacker able to knock out Redis must not be handed unlimited guesses as
+ * the reward.
+ */
+async function ipLimited(
+  bucket: string,
+  limit: number,
+  windowSec: number,
+  failClosed = false,
+): Promise<boolean> {
   const { ip } = await requestCtx();
-  const rl = await security.checkRateLimit({ key: `${bucket}:ip:${ip}`, limit, windowSec });
+  const rl = await security.checkRateLimit({ key: `${bucket}:ip:${ip}`, limit, windowSec, failClosed });
   return !rl.ok;
 }
 
@@ -76,7 +87,7 @@ export async function signUpAction(input: {
  */
 export async function requestPasswordResetAction(email: string): Promise<{ ok: boolean }> {
   const normalized = email.toLowerCase().trim();
-  if (!EMAIL_RE.test(normalized) || (await ipLimited('pw-reset', 10, 3600))) return { ok: true };
+  if (!EMAIL_RE.test(normalized) || (await ipLimited('pw-reset', 10, 3600, true))) return { ok: true };
   const user = await prisma.user.findUnique({
     where: { email: normalized },
     select: { id: true, deletedAt: true },

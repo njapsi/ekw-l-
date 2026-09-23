@@ -73,6 +73,16 @@ describe('check-env.mjs', () => {
     expect(ok.code).toBe(0);
   });
 
+  it('rejects an unauthenticated REDIS_URL in production but accepts it with --allow-insecure (Phase 12)', () => {
+    const bad = run({ ...GOOD, REDIS_URL: 'rediss://redis.example:6379' });
+    expect(bad.code).toBe(1);
+    expect(bad.out).toMatch(/REDIS_URL\s+.*invalid/);
+    expect(bad.out).toMatch(/must include a password/);
+
+    const ok = run({ ...GOOD, REDIS_URL: 'rediss://redis.example:6379' }, ['--allow-insecure']);
+    expect(ok.code).toBe(0);
+  });
+
   it('blocks AUTH_DEV_LOGIN=true in production', () => {
     const { code, out } = run({ ...GOOD, AUTH_DEV_LOGIN: 'true' });
     expect(code).toBe(1);

@@ -20,6 +20,19 @@ export interface RateLimitOptions {
   limit: number;
   /** Window length in seconds. */
   windowSec: number;
+  /**
+   * Phase 12 (§34): when true, a Redis outage BLOCKS the request instead of
+   * allowing it through. The module-level default is fail-open (above) by
+   * design — most limits (agent-stream, OAuth callbacks, crawl-start) exist
+   * to smooth abuse, and refusing every request during a Redis blip would be
+   * a self-inflicted outage worse than the abuse it guards against. A small,
+   * explicit set of credential-guessing surfaces — password login,
+   * password-reset request, magic-link send — is the exception: their whole
+   * job is bounding brute-force attempts, so an attacker able to trigger a
+   * Redis outage must not be handed unlimited guesses as the reward. Callers
+   * opt in per call site; nothing defaults to this.
+   */
+  failClosed?: boolean;
 }
 
 export interface RateLimitResult {
@@ -68,9 +81,20 @@ export async function checkRateLimit(opts: RateLimitOptions): Promise<RateLimitR
     if (!warnedDegraded) {
       warnedDegraded = true;
       log.warn(
-        { err: err instanceof Error ? err.message : String(err) },
-        'rate limiter unavailable (Redis) — failing open',
+        {
+          err: err instanceof Error ? err.message : String(err),
+          failClosed: Boolean(opts.failClosed),
+        },
+        opts.failClosed
+          ? 'rate limiter unavailable (Redis) — failing closed for a credential-guessing surface'
+          : 'rate limiter unavailable (Redis) — failing open',
       );
+    }
+    if (opts.failClosed) {
+      // No count to base a real reset time on — ask the caller to back off
+      // for a fixed, short interval rather than claim a bucket state we
+      // never actually observed.
+      return { ok: false, remaining: 0, retryAfterSec: 30, degraded: true };
     }
     return { ok: true, remaining: limit, retryAfterSec: 0, degraded: true };
   }

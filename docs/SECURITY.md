@@ -8,6 +8,15 @@ is implemented.
 > an area-by-area verdict are in **`docs/SECURITY-AUDIT.md`** (0 Critical, 2
 > High, 3 Medium; all Critical/High fixed). ADR-0029 records the hardening
 > decisions.
+>
+> **Phase 12 — Enterprise Security, Reliability, Governance & Production
+> Hardening** added MFA, fail-closed rate limiting on credential-guessing
+> surfaces, a Growth Missions kill switch, a real readiness endpoint, and
+> real incident-response/disaster-recovery runbooks — see
+> **`docs/SECURITY_POSTURE.md`** for the full posture statement, threat model,
+> control inventory and risk register (PASS / PASS WITH CONDITIONS / FAIL /
+> NOT TESTED per category — deliberately not a numeric score), and
+> **`docs/PHASE-12-REPORT.md`** for the complete change log. ADR-0061.
 
 ---
 
@@ -42,10 +51,36 @@ is implemented.
   server layout re-reads `sessionVersion` and `deletedAt` from the database on
   every request and forces re-login on a mismatch. Bumping `sessionVersion`
   invalidates all of a user's tokens within the 8-hour window.
-- No passwords in MVP → no password storage risk. If added later: Argon2id,
-  breach-list check, per-user rate limiting.
+- **Password auth (ADR-0049):** salted scrypt via `node:crypto` (no bcrypt/
+  argon2 dependency), rate-limited (10/hour/address, **fails closed** under a
+  Redis outage — Phase 12 §34, see §8), a real scrypt computation runs even
+  for a nonexistent email so timing can't leak account existence. Signup
+  verification and password reset both reuse the magic-link
+  `VerificationToken` mechanism rather than a parallel one.
 - `trustHost` is enabled (self-hosted behind a reverse proxy that sets a
   correct `Host` / `X-Forwarded-Host`).
+- **Multi-factor authentication (Phase 12):** hand-rolled RFC 6238 TOTP
+  (`node:crypto` HMAC-SHA1, no `otplib`/`speakeasy` dependency,
+  `packages/services/src/auth/mfa.ts`) plus one-time recovery codes.
+  Enrollment is two-step — a generated secret is stored `PENDING` and sealed
+  with the same AES-256-GCM envelope as OAuth tokens; the factor only becomes
+  `ACTIVE` once the user proves they configured it correctly with one live
+  code, at which point 10 recovery codes are issued (SHA-256 hashed at rest,
+  shown once, one-time use). Turning MFA off, or generating a fresh set of
+  recovery codes, requires **both** a recent real sign-in (`hasRecentAuth`,
+  the same 15-minute window ownership transfer and org deletion already use)
+  **and** a live TOTP/recovery code — the same double-check GitHub/Google use,
+  so a hijacked session with a stale cookie cannot silently disable
+  protection. **Deliberately not wired into the sign-in flow itself**:
+  restructuring Auth.js's Credentials provider into a two-step
+  password-then-TOTP exchange is a materially larger, riskier change to an
+  already-audited, live-verified authentication path than this phase's
+  budget justified without the ability to test a real login flow against it
+  (`CLAUDE.md`'s own "do not replace the existing authentication architecture
+  without first proving it is necessary"). WebAuthn/passkeys remain a defined
+  -but-unimplemented `UserMfaFactor.type` value, same pattern as
+  `AgentRunStatus.TIMED_OUT` elsewhere in this codebase — reserved, not a
+  placeholder pretending to work.
 - Enterprise: SSO (OIDC/SAML via WorkOS) + SCIM, enforced per-org.
 
 ## 3. Authorization & tenancy
@@ -59,10 +94,14 @@ is implemented.
   policies on every tenant table) is the **intended** defense-in-depth backstop
   but is **not yet implemented** — the current `withOrgScope` helper is unused
   and a safe `FORCE RLS` retrofit needs a `withTenant()` wrapper across ~320
-  call sites plus a second non-owner DB role (tracked HIGH, ADR-0035 §5). Until
+  call sites plus a second non-owner DB role (tracked HIGH, ADR-0035 §5,
+  re-affirmed with a concrete future design sketch in ADR-0061). Until
   then tenant isolation is **app-layer only**: every service query filters by
   `organizationId`, `scripts/check-tenant-scope.mjs` fails CI on an unscoped
-  list/bulk/aggregate query, and the isolation integration suite is the enforced
+  list/bulk/aggregate query (Phase 12 closed a real gap in its own allowlist —
+  21 tenant-scoped models added across Phases 1/2/5/6-10 had never been added
+  to the models it checks, so every query against them was silently unchecked
+  the whole time), and the isolation integration suite is the enforced
   guarantee.
 - Isolation tests in CI: for every module's public API, user of org A gets
   `404`/deny on org B resources (read, write, list, export).
@@ -134,6 +173,24 @@ strict-origin-when-cross-origin`, `Permissions-Policy` minimal,
   non-Action call. OAuth flows use a signed `state` **and** are bound to the
   session that started the flow (the callback rejects a `state` whose `userId`
   is not the signed-in user — ADR-0029, SECURITY-AUDIT.md H-1).
+- **CORS (Phase 12 §34, made explicit — the practical behavior is unchanged):**
+  this app sets **no** `Access-Control-Allow-Origin` header anywhere, on any
+  route — confirmed by `e2e/api.spec.ts`'s own assertion that the header is
+  always `undefined`. Every cookie-session page and Server Action is
+  same-origin by design; a script on another origin cannot read a response
+  from this app in a browser. The one surface a browser script from another
+  origin might reasonably want to call cross-origin — the bearer-key
+  `/api/v1/*` API — is intentionally left the same way rather than answered
+  with a wildcard or reflected-origin CORS policy: a bearer token in an
+  `Authorization` header is not automatically attached by a browser
+  cross-origin the way a cookie is, so the CSRF risk CORS exists to prevent
+  does not apply to it, and a permissive policy here would be a gratuitous
+  new attack surface for no real benefit (nothing in this deployment needs
+  browser-JS-from-another-origin access to `/api/v1/*` today — a server-side
+  caller, which CORS never restricts, works unchanged). If a future consumer
+  genuinely needs `/api/v1/*` reachable from browser JS on another origin,
+  that is a scoped, deliberate addition (specific allowed origins, never
+  `*` combined with credentials) — not a default to relax.
 - **XSS:** React auto-escaping; no `dangerouslySetInnerHTML` with untrusted
   input; sanitize any rendered HTML from crawl data with a strict allowlist;
   CSP as backstop.
@@ -203,12 +260,35 @@ sockets for a crawl. Controls (full detail in `SEO-ENGINE.md`):
 - Layered limits (`API.md` §7): edge IP → per-identity (Redis token bucket) →
   per-org usage limits.
 - **Implemented so far** (`packages/services/src/security/rate-limit.ts`,
-  ADR-0029): a fixed-window Redis counter that **fails open** if Redis is down,
-  applied to magic-link send (5/hour/email, via the `signIn` callback), OAuth
-  connect (15/10min/user) + callback (20/10min/IP), agent run (20/min/org+user),
-  crawl start (10/10min/org) and `/api/health` (240/min/IP + a 4 s report
-  cache). The full edge/IP layer and an aggregate magic-link volume cap remain
-  roadmap "Phase 3".
+  ADR-0029): a fixed-window Redis counter that **fails open by default** if
+  Redis is down, applied to magic-link send (5/hour/email, via the `signIn`
+  callback), OAuth connect (15/10min/user) + callback (20/10min/IP), agent run
+  (20/min/org+user), crawl start (10/10min/org) and `/api/health` /
+  `/api/health/ready` (240/min/IP + a 4 s report cache). The full edge/IP
+  layer and an aggregate magic-link volume cap remain roadmap "Phase 3".
+- **Fail-closed option (Phase 12 §34):** `checkRateLimit` now takes an opt-in
+  `failClosed` flag — when Redis is unreachable, the caller is refused instead
+  of let through. Applied to the two pure credential-guessing surfaces where
+  a Redis outage must not hand an attacker unlimited guesses: **password
+  login** (`password-login:<email>`, `auth/providers.ts`) and
+  **password-reset request** (`pw-reset:ip:<ip>`, `auth-actions.ts` — this one
+  never signals success/failure either way, so failing closed has no
+  enumeration side effect). **Magic-link send stays fail-open, deliberately**:
+  unlike password login, magic-link is the sole sign-in *and* account-recovery
+  path for every passwordless account, so failing closed there would turn a
+  transient Redis blip into a total authentication lockout for that
+  population — a worse outcome than briefly loosening a send-abuse control
+  that isn't actually guarding a secret (there's nothing to "guess" in an
+  email-send action). This is a considered, disclosed trade-off, not an
+  oversight — see the comment at the `signIn` callback in `auth/config.ts`.
+- **Readiness endpoint (Phase 12):** `GET /api/health/ready` reuses the same
+  `runHealthChecks` logic as `/api/health` but — unlike that endpoint, which
+  is deliberately liveness-only and always 200 (its own contract, depended on
+  by `Dockerfile.web`'s `HEALTHCHECK` and both compose files' healthchecks,
+  intentionally unchanged) — returns a **real 503** when the aggregate status
+  is `down`, for a caller that gates on the HTTP status code alone (a future
+  Kubernetes `readinessProbe`, an external uptime monitor) rather than parsing
+  the JSON body.
 - Sensitive buckets: login, magic-link send, invitation send, OAuth callback,
   crawl start, agent run start, report export, password-reset (if added).
 - Abuse monitoring (Admin): repeated auth failures, crawl attempts on
@@ -248,6 +328,18 @@ sockets for a crawl. Controls (full detail in `SEO-ENGINE.md`):
 - Every create / update / pause / resume / delete and every run outcome
   (`succeeded` / `failed` / `skipped` / `retry_scheduled` / `cancelled`) is
   audit-logged; `SYSTEM`-actor for scheduled runs.
+
+### 9b. Growth Missions kill switch (Phase 12)
+
+Missions execute real, unattended, multi-step actions across YouTube/TikTok/
+WordPress/SEO — the same class of risk the crawler already had a global stop
+for. `MISSIONS_HALT=1` (or `MISSIONS_HALT_ORG_IDS=<id,...>`,
+`packages/services/src/missions/killswitch.ts`) mirrors `CRAWLER_HALT`'s exact
+shape: checked at the top of both `runMissionTick` (the scheduled sweep) and
+`runMissionTaskManually` (a human clicking "run this task now" — the switch
+would not be a real kill switch if a user could bypass it that way), a halted
+mission is skipped without touching its stored status, and a tick already in
+flight finishes rather than being interrupted mid-step.
 
 ## 10. Webhooks
 
@@ -460,12 +552,21 @@ Fields: actor (+ type), action, target, ip, user-agent, metadata, timestamp.
   no build tools in the runtime layer.
 - Security disclosure policy + `SECURITY.md` contact; triage SLA.
 
-## 15. Incident response (outline)
+## 15. Incident response
 
 Detect (alerts) → declare + assign IC → contain (kill switch, revoke, isolate) →
 eradicate → recover → post-mortem within 5 business days → customer + regulator
-notification per legal timelines. Runbooks: token-key compromise, tenant leak,
-crawler misuse, provider key leak, webhook secret leak.
+notification per legal timelines. **Phase 12 replaced this one-paragraph
+outline with real, step-by-step runbooks** for the ten scenarios this
+document previously only named: token/key compromise, tenant leak, crawler
+misuse, provider key leak, webhook secret leak, OAuth token compromise, API
+key compromise, database compromise, AI API key compromise, and admin account
+compromise — each with concrete detect/contain/investigate/mitigate/
+recover/communicate/postmortem/preventive-action steps naming the actual
+kill switches, revocation calls, and admin pages this codebase has. See
+**`docs/INCIDENT-RESPONSE.md`**. Disaster-recovery procedures (infrastructure
+loss, not a security incident) are in **`docs/DISASTER-RECOVERY.md`**,
+expanding `docs/DEPLOYMENT.md` §18.
 
 ---
 

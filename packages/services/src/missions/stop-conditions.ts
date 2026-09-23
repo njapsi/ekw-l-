@@ -12,6 +12,7 @@ export type MissionStopReason =
   | 'BUDGET_EXHAUSTED'
   | 'ACTION_LIMIT_REACHED'
   | 'TASK_LIMIT_REACHED'
+  | 'WEEKLY_LIMIT_REACHED'
   | 'INTEGRATION_DISCONNECTED'
   | 'REPEATED_FAILURE'
   | 'SAFETY_POLICY_TRIGGERED'
@@ -21,6 +22,12 @@ export type MissionStopReason =
 export interface StopEvaluationInput {
   status: 'DRAFT' | 'PLANNING' | 'AWAITING_APPROVAL' | 'ACTIVE' | 'PAUSED' | 'BLOCKED' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
   targetDate: Date | null;
+  /** When the mission was activated — `limits.maxDurationDays` is measured
+   *  from here, independent of `targetDate` (a mission may have no target
+   *  date at all, or one further out than its own configured max-duration
+   *  leash). Null only for a mission that was never activated, in which case
+   *  the duration check cannot fire. */
+  activatedAt: Date | null;
   now: Date;
   limits: MissionLimits;
   toolCallCount: number;
@@ -36,6 +43,12 @@ export interface StopEvaluationInput {
   /** True when a platform this mission depends on lost its connection since
    *  the mission was activated. */
   requiredIntegrationDisconnected: boolean;
+  /** Successful (approved-and-executed) publish-shaped tool calls in the
+   *  trailing 7 days — Part 19's `maxPublishPerWeek`. */
+  publishesInLast7Days: number;
+  /** Successful content-generation-shaped tool calls in the trailing 7 days
+   *  — Part 19's `maxContentGenerationsPerWeek`. */
+  contentGenerationsInLast7Days: number;
 }
 
 const LOOP_FAILURE_LIMIT = 5;
@@ -47,11 +60,21 @@ export function evaluateStopConditions(input: StopEvaluationInput): MissionStopR
   if (input.status === 'PAUSED') return 'USER_PAUSED';
   if (input.allSuccessMetricsMet) return 'GOAL_ACHIEVED';
   if (input.targetDate && input.now >= input.targetDate) return 'DEADLINE_REACHED';
+  if (input.activatedAt) {
+    const maxDurationMs = input.limits.maxDurationDays * 24 * 60 * 60 * 1000;
+    if (input.now.getTime() - input.activatedAt.getTime() >= maxDurationMs) {
+      return 'DEADLINE_REACHED';
+    }
+  }
   if (input.budgetMaxUsd != null && input.budgetSpentUsd >= input.budgetMaxUsd) {
     return 'BUDGET_EXHAUSTED';
   }
   if (input.toolCallCount >= input.limits.maxToolCalls) return 'ACTION_LIMIT_REACHED';
   if (input.taskCount >= input.limits.maxTasks) return 'TASK_LIMIT_REACHED';
+  if (input.publishesInLast7Days >= input.limits.maxPublishPerWeek) return 'WEEKLY_LIMIT_REACHED';
+  if (input.contentGenerationsInLast7Days >= input.limits.maxContentGenerationsPerWeek) {
+    return 'WEEKLY_LIMIT_REACHED';
+  }
   if (input.requiredIntegrationDisconnected) return 'INTEGRATION_DISCONNECTED';
   if (input.loopFailureCount >= LOOP_FAILURE_LIMIT) return 'REPEATED_FAILURE';
   return null;

@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { prisma } from '@growth-agent/db';
 import { security } from '@growth-agent/services';
-import { listUserSessions } from '@growth-agent/services/auth';
+import { getMfaStatus, listUserSessions } from '@growth-agent/services/auth';
 import {
   Badge,
   Button,
@@ -12,6 +12,7 @@ import {
   CardHeader,
   CardTitle,
 } from '@growth-agent/ui';
+import { MfaCard } from '@/components/app/settings/mfa-panel';
 import { SessionsCard } from '@/components/app/settings/security-panel';
 import { requireUser } from '@/lib/auth';
 
@@ -52,7 +53,7 @@ function when(d: Date) {
 
 export default async function SecuritySettingsPage() {
   const user = await requireUser();
-  const [sessions, loginHistory, events, account] = await Promise.all([
+  const [sessions, loginHistory, events, account, mfaStatus] = await Promise.all([
     listUserSessions(user.id, user.sessionId),
     security.listSecurityEvents(user.id, { types: [...LOGIN_TYPES], limit: 20 }),
     security.listSecurityEvents(user.id, { limit: 60 }),
@@ -60,6 +61,7 @@ export default async function SecuritySettingsPage() {
       where: { id: user.id },
       select: { passwordHash: true, emailVerified: true, accounts: { select: { provider: true } } },
     }),
+    getMfaStatus(user.id),
   ]);
   const otherEvents = events
     .filter((e) => !(LOGIN_TYPES as readonly string[]).includes(e.type))
@@ -112,28 +114,31 @@ export default async function SecuritySettingsPage() {
         </CardContent>
       </Card>
 
+      <MfaCard
+        status={{
+          enabled: mfaStatus.enabled,
+          enrolledAt: mfaStatus.enrolledAt?.toISOString() ?? null,
+          recoveryCodesRemaining: mfaStatus.recoveryCodesRemaining,
+        }}
+      />
+
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Two-factor authentication</CardTitle>
+          <CardTitle className="text-base">Passkeys (WebAuthn)</CardTitle>
           <CardDescription>
-            Not available yet. Nothing on this page turns on a second factor today, and your account
-            is protected by your password or email link only.
+            Phishing-resistant sign-in with your device&apos;s fingerprint, face, or security key.
           </CardDescription>
         </CardHeader>
-        <CardContent className="grid gap-3 text-sm sm:grid-cols-3">
-          {[
-            { name: 'Passkeys (WebAuthn)', note: 'Phishing-resistant. Planned first.' },
-            { name: 'Authenticator app (TOTP)', note: 'One-time codes. Not phishing-resistant.' },
-            { name: 'Recovery codes', note: 'For when you lose a device.' },
-          ].map((f) => (
-            <div key={f.name} className="rounded-md border p-3">
-              <p className="flex items-center justify-between gap-2 font-medium">
-                {f.name}
-                <Badge variant="outline">Coming soon</Badge>
-              </p>
-              <p className="text-muted-foreground mt-1 text-xs">{f.note}</p>
-            </div>
-          ))}
+        <CardContent>
+          <div className="rounded-md border p-3 text-sm">
+            <p className="flex items-center justify-between gap-2 font-medium">
+              Passkeys
+              <Badge variant="outline">Coming soon</Badge>
+            </p>
+            <p className="text-muted-foreground mt-1 text-xs">
+              Not implemented yet. Use an authenticator app above in the meantime.
+            </p>
+          </div>
         </CardContent>
       </Card>
 

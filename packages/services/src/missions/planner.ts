@@ -20,9 +20,11 @@ import { listWebsites } from '../seo/read.js';
 import { UNTRUSTED_CONTENT_SYSTEM_CLAUSE, wrapUntrusted } from '../security/untrusted.js';
 import { retrieveKnowledge, type RetrievedKnowledge } from '../knowledge/retrieval.js';
 import type { EmbeddingCapableModel } from '../knowledge/embeddings.js';
+import { enforceAiBudget } from '../usage/ai-budget.js';
 import { listRecentLearnings } from './learning.js';
 import { hasCycle } from './task-graph.js';
 import {
+  MissionLimitsSchema,
   MissionStrategySchema,
   type MissionPlatformKey,
   type MissionStrategy,
@@ -326,10 +328,23 @@ const ModelStrategyOutput = z.object({
 
 async function refineNarrative(
   model: PlannerModel | undefined,
-  input: { objective: string; evidence: string[]; assumptions: string[]; priorLearnings: string[] },
+  input: {
+    organizationId: string;
+    objective: string;
+    evidence: string[];
+    assumptions: string[];
+    priorLearnings: string[];
+  },
+  db: Db,
 ): Promise<{ narrative: string; currentState: string; targetState: string; grounded: boolean } | null> {
   if (!model) return null;
   try {
+    // Part 19/53: the same org-wide AI budget every other AI call in this
+    // app checks before spending — a mission's optional narrative
+    // refinement degrades to the deterministic narrative (below) once the
+    // org's plan is exhausted, exactly like any other best-effort model
+    // call in this codebase, rather than being a second, unmetered path.
+    await enforceAiBudget({ organizationId: input.organizationId, db });
     const res = await model.generateObject({
       schema: ModelStrategyOutput,
       system: `You write a short, factual growth-mission strategy summary from real evidence only. Never invent a number or claim a result is guaranteed. If a PRIOR LESSON is directly relevant, you may reference it, but never present a HYPOTHESIS-labelled lesson as a proven fact. Do not reveal chain-of-thought — three short fields only.\n\n${UNTRUSTED_CONTENT_SYSTEM_CLAUSE}`,
@@ -350,12 +365,22 @@ export interface GeneratedPlan {
 export async function generateMissionPlan(
   input: {
     organizationId: string;
-    mission: { id: string; objective: string; allowedPlatforms: MissionPlatformKey[] };
+    mission: {
+      id: string;
+      objective: string;
+      allowedPlatforms: MissionPlatformKey[];
+      limits?: unknown;
+    };
     model?: PlannerModel;
     embeddingModel?: EmbeddingCapableModel;
   },
   db: Db = prisma,
 ): Promise<GeneratedPlan> {
+  // Part 19: a mission's own configured `maxRetries` — previously computed
+  // but never actually applied to the tasks the planner creates, so every
+  // task silently used the DB column default (2) regardless of what the
+  // mission's limits said.
+  const missionMaxRetries = MissionLimitsSchema.parse(input.mission.limits ?? {}).maxRetries;
   const [draft, knowledgeContext] = await Promise.all([
     buildDraft(input.organizationId, input.mission.allowedPlatforms, db),
     gatherKnowledgeContext(
@@ -405,6 +430,7 @@ export async function generateMissionPlan(
           toolInput: (task.toolInput ?? null) as unknown as Prisma.InputJsonValue,
           priority: task.priority,
           dependsOnTaskIds: [], // resolved below once every id is known
+          maxRetries: missionMaxRetries,
         },
       });
       keyToId.set(task.key, row.id);
@@ -422,7 +448,11 @@ export async function generateMissionPlan(
 
   if (
     hasCycle(
-      (await db.missionTask.findMany({ where: { missionId: input.mission.id } })).map((t) => ({
+      (
+        await db.missionTask.findMany({
+          where: { missionId: input.mission.id, organizationId: input.organizationId },
+        })
+      ).map((t) => ({
         id: t.id,
         status: t.status as never,
         dependsOnTaskIds: t.dependsOnTaskIds,
@@ -432,12 +462,17 @@ export async function generateMissionPlan(
     throw new Error('mission planner produced a cyclic task graph — this is a planner bug, not user error');
   }
 
-  const refined = await refineNarrative(input.model, {
-    objective: input.mission.objective,
-    evidence: draft.evidence,
-    assumptions: draft.assumptions,
-    priorLearnings: knowledgeContext.priorLearnings,
-  });
+  const refined = await refineNarrative(
+    input.model,
+    {
+      organizationId: input.organizationId,
+      objective: input.mission.objective,
+      evidence: draft.evidence,
+      assumptions: draft.assumptions,
+      priorLearnings: knowledgeContext.priorLearnings,
+    },
+    db,
+  );
 
   const strategy = MissionStrategySchema.parse({
     narrative:

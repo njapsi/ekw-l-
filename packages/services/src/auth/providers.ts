@@ -146,6 +146,10 @@ export function buildProviders(): Provider[] {
           key: `password-login:${email}`,
           limit: PASSWORD_LOGIN_LIMIT,
           windowSec: 3600,
+          // Phase 12 §34: this is a credential-guessing surface, so a Redis
+          // outage refuses the attempt instead of handing out unlimited
+          // password guesses for the duration of the outage.
+          failClosed: true,
         });
         if (!rl.ok) {
           log.warn({ email }, 'password login rate-limited');

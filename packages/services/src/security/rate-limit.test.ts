@@ -2,19 +2,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // A tiny in-memory stand-in for the observability Redis client.
 const store = new Map<string, { value: number; expireAt: number }>();
+async function realIncr(key: string): Promise<number> {
+  const now = Date.now();
+  const cur = store.get(key);
+  if (cur && cur.expireAt > now) {
+    cur.value += 1;
+    return cur.value;
+  }
+  store.set(key, { value: 1, expireAt: Number.MAX_SAFE_INTEGER });
+  return 1;
+}
+
 const fakeRedis = {
   status: 'ready' as string,
   connect: vi.fn(async () => undefined),
-  async incr(key: string) {
-    const now = Date.now();
-    const cur = store.get(key);
-    if (cur && cur.expireAt > now) {
-      cur.value += 1;
-      return cur.value;
-    }
-    store.set(key, { value: 1, expireAt: Number.MAX_SAFE_INTEGER });
-    return 1;
-  },
+  incr: realIncr,
   async expire(key: string, sec: number) {
     const cur = store.get(key);
     if (cur) cur.expireAt = Date.now() + sec * 1000;
@@ -31,6 +33,12 @@ const { checkRateLimit, clientIpFrom, resetRateLimitWarnForTest } = await import
 beforeEach(() => {
   store.clear();
   fakeRedis.status = 'ready';
+  // A test that simulates a Redis outage replaces `incr` with a throwing
+  // stub; restore the real one so that mutation never leaks into the next
+  // test (this was a real, latent bug: the pre-existing "fails OPEN" test
+  // already did this and relied on being the last `incr`-dependent test in
+  // the file to get away with it).
+  fakeRedis.incr = realIncr;
   resetRateLimitWarnForTest();
 });
 afterEach(() => vi.clearAllMocks());
@@ -64,6 +72,23 @@ describe('checkRateLimit', () => {
     const r = await checkRateLimit({ key: 'x', limit: 1, windowSec: 60 });
     expect(r.ok).toBe(true);
     expect(r.degraded).toBe(true);
+  });
+
+  it('fails CLOSED for a credential-guessing surface when opted in (Phase 12 §34)', async () => {
+    fakeRedis.incr = vi.fn(async () => {
+      throw new Error('ECONNREFUSED');
+    });
+    const r = await checkRateLimit({ key: 'password-login:x', limit: 1, windowSec: 60, failClosed: true });
+    expect(r.ok).toBe(false);
+    expect(r.degraded).toBe(true);
+    expect(r.retryAfterSec).toBeGreaterThan(0);
+  });
+
+  it('a healthy Redis is unaffected by failClosed — normal counting still applies', async () => {
+    const r1 = await checkRateLimit({ key: 'y', limit: 1, windowSec: 60, failClosed: true });
+    expect(r1.ok).toBe(true);
+    const r2 = await checkRateLimit({ key: 'y', limit: 1, windowSec: 60, failClosed: true });
+    expect(r2.ok).toBe(false);
   });
 });
 

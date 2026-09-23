@@ -68,3 +68,19 @@ export { handleStripeWebhook, type WebhookDeps, type WebhookResult } from './web
 export { reconcileOrganization, reconcileAllOrganizations } from './reconcile.js';
 export { billingContextFromEnv, isBillingConfigured, type BillingContext } from './service.js';
 export { runBillingReconcileJob, rebuildUsageCountersJob } from './jobs.js';
+export { checkUsageAlertsForOrg, runUsageAlertsJob, runTrialEndingSoonJob } from './alerts.js';
+export {
+  grantCredits,
+  consumeCredits,
+  adjustCredits,
+  getCreditBalance,
+  listCreditTransactions,
+  type CreditTransactionType,
+} from './credits.js';
+export {
+  createEnterpriseContract,
+  expireEnterpriseContract,
+  getActiveEnterpriseContract,
+  type CustomEntitlements,
+} from './enterprise.js';
+export { getDowngradeImpact, type DowngradeImpact } from './downgrade-impact.js';

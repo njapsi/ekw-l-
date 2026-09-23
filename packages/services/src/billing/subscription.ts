@@ -205,6 +205,18 @@ export async function downgradeToFree(
   return updated;
 }
 
+export interface SeatSummary {
+  active: number;
+  /** Pending invitations — not accepted, not revoked, not expired. */
+  invited: number;
+  limit: number | null;
+  /** `null` when the seat limit is unlimited. Floored at 0 — invited seats
+   *  can put an org at or past its limit even before anyone new joins
+   *  (§42: "do not double-charge the same user unexpectedly" — this is the
+   *  read the UI uses to warn *before* an invite would tip the org over). */
+  available: number | null;
+}
+
 export interface BillingSummary {
   tier: BillingTier;
   planName: string;
@@ -213,6 +225,7 @@ export interface BillingSummary {
   entitled: boolean;
   interval: BillingInterval;
   seats: number;
+  seatSummary: SeatSummary;
   cancelAtPeriodEnd: boolean;
   currentPeriodEnd: string | null;
   trialEndsAt: string | null;
@@ -239,13 +252,17 @@ export async function getBillingSummary(
   db: Db = prisma,
 ): Promise<BillingSummary> {
   const sub = await getOrCreateSubscription(organizationId, db);
-  const [{ features }, usage, invoices] = await Promise.all([
+  const [{ features, limits }, usage, invoices, activeSeats, invitedSeats] = await Promise.all([
     resolveEntitlements(organizationId, db),
     getUsageSummary(organizationId, db),
     db.invoice.findMany({
       where: { organizationId },
       orderBy: { createdAt: 'desc' },
       take: 24,
+    }),
+    db.membership.count({ where: { organizationId, status: 'ACTIVE' } }),
+    db.invitation.count({
+      where: { organizationId, acceptedAt: null, revokedAt: null, expiresAt: { gt: new Date() } },
     }),
   ]);
 
@@ -257,6 +274,12 @@ export async function getBillingSummary(
     entitled: isEntitledStatus(sub.status),
     interval: sub.interval,
     seats: sub.seats,
+    seatSummary: {
+      active: activeSeats,
+      invited: invitedSeats,
+      limit: limits.SEATS,
+      available: limits.SEATS == null ? null : Math.max(0, limits.SEATS - activeSeats - invitedSeats),
+    },
     cancelAtPeriodEnd: sub.cancelAtPeriodEnd,
     currentPeriodEnd: sub.currentPeriodEnd?.toISOString() ?? null,
     trialEndsAt: sub.trialEndsAt?.toISOString() ?? null,

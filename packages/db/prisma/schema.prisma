@@ -205,6 +205,8 @@ model Organization {
   usageRecords              UsageRecord[]
   usageCounters             UsageCounter[]
   invoices                  Invoice[]
+  creditTransactions        CreditTransaction[]
+  enterpriseContract        EnterpriseContract?
   reports                   Report[]
   automationRules           AutomationRule[]
   automationRuns            AutomationRun[]
@@ -2076,6 +2078,78 @@ model BillingEvent {
 
   @@index([type, receivedAt])
   @@map("billing_events")
+}
+
+/// Phase 13 (§23/§24): a per-organization credit ledger, additive to the
+/// plan's own usage allowance. Every balance change is its own append-only
+/// row carrying a `balanceAfter` snapshot — never a bare `balance = balance
+/// - N` mutation (master instruction: "never silently modify historical
+/// usage events"), so the running balance is always reconstructible from
+/// history alone.
+enum CreditTransactionType {
+  PURCHASE
+  GRANT
+  CONSUMPTION
+  REFUND
+  ADJUSTMENT
+  EXPIRATION
+}
+
+model CreditTransaction {
+  id             String                @id @default(cuid())
+  organizationId String
+  meter          UsageMeter
+  type           CreditTransactionType
+  /// Positive for PURCHASE/GRANT/REFUND, negative for CONSUMPTION/EXPIRATION
+  /// and a downward ADJUSTMENT.
+  amount         Int
+  balanceAfter   Int
+  /// Free-text provenance (a grant's reason, a purchase's payment reference).
+  source         String?
+  /// e.g. the UsageRecord/idempotencyKey a CONSUMPTION settled against.
+  referenceId    String?
+  actorId        String?
+  createdAt      DateTime              @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, meter, createdAt])
+  @@map("credit_transactions")
+}
+
+/// Phase 13 (§44-§46): a negotiated enterprise agreement, layered as a
+/// further override on top of the existing PLAN → OVERRIDE/PROMO
+/// `Entitlement` resolution rather than a parallel authorization path —
+/// `resolveEntitlements` consults an org's ACTIVE, unexpired contract last,
+/// after PLAN and per-key OVERRIDE/PROMO rows, so "Enterprise" never
+/// bypasses the one resolution order every other override already goes
+/// through. `customEntitlements` mirrors `Entitlement`'s own `limit:<METER>`
+/// / `feature:<name>` key shape, kept together here (rather than as N
+/// separate `Entitlement` rows) so a whole contract can be inspected,
+/// audited and expired as one unit.
+enum EnterpriseContractStatus {
+  ACTIVE
+  EXPIRED
+  CANCELLED
+}
+
+model EnterpriseContract {
+  id                 String                   @id @default(cuid())
+  organizationId     String                   @unique
+  status             EnterpriseContractStatus @default(ACTIVE)
+  contractStart      DateTime
+  contractEnd        DateTime?
+  seatLimit          Int?
+  customEntitlements Json
+  billingTerms       String?
+  supportLevel       String?
+  createdById        String?
+  createdAt          DateTime                 @default(now())
+  updatedAt          DateTime                 @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@map("enterprise_contracts")
 }
 
 // ===========================================================================

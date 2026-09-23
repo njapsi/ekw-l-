@@ -1,5 +1,6 @@
 'use server';
 
+import { randomUUID } from 'node:crypto';
 import { revalidatePath } from 'next/cache';
 import { content, isAppError, usage } from '@growth-agent/services';
 import { requirePermission } from '@/lib/auth';
@@ -96,27 +97,49 @@ export async function generateAssetsAction(
     const { user, org } = await requirePermission('content:manage');
     // Server-side limit enforcement — the browser is never trusted (ADR-0025).
     await usage.enforceAiUserLimit({ organizationId: org.id, userId: user.id, scope: 'content' });
-    await usage.enforceUsage({
+    // Phase 13: reserve the full requested amount atomically *before* the job
+    // runs (closes the check-then-act race `enforceUsage` alone has under
+    // concurrent requests — §55/§56), then settle down to the actual count
+    // once the job finishes (fewer assets than requested is a normal
+    // per-type failure mode, not an error).
+    const requestedAmount = types?.length || 1;
+    const reservationKey = `content_gen_reserve:${projectId}:${randomUUID()}`;
+    await usage.reserveUsage({
       organizationId: org.id,
       meter: 'CONTENT_GENERATIONS',
-      amount: types?.length || 1,
+      amount: requestedAmount,
+      idempotencyKey: reservationKey,
+      actorId: user.id,
+      subjectType: 'repurpose_project',
+      subjectId: projectId,
     });
-    const res = await content.generateAssetsJob({
-      organizationId: org.id,
-      userId: user.id,
-      projectId,
-      types: types as never,
-      trigger: 'ui',
-    });
-    if (res.assetIds.length > 0) {
-      await usage.recordUsage({
+    let res: Awaited<ReturnType<typeof content.generateAssetsJob>>;
+    try {
+      res = await content.generateAssetsJob({
+        organizationId: org.id,
+        userId: user.id,
+        projectId,
+        types: types as never,
+        trigger: 'ui',
+      });
+    } catch (e) {
+      await usage.releaseUsageReservation({
         organizationId: org.id,
         meter: 'CONTENT_GENERATIONS',
-        quantity: res.assetIds.length,
-        idempotencyKey: `content_gen:${projectId}:${res.assetIds.slice().sort().join(',')}`,
-        actorId: user.id,
-        subjectType: 'repurpose_project',
-        subjectId: projectId,
+        quantity: requestedAmount,
+        idempotencyKey: reservationKey,
+        reason: 'generation job failed before producing any assets',
+      });
+      throw e;
+    }
+    const unused = requestedAmount - res.assetIds.length;
+    if (unused > 0) {
+      await usage.releaseUsageReservation({
+        organizationId: org.id,
+        meter: 'CONTENT_GENERATIONS',
+        quantity: unused,
+        idempotencyKey: reservationKey,
+        reason: 'fewer assets generated than requested',
       });
     }
     revalidatePath(`/app/content/${projectId}`);
@@ -275,28 +298,38 @@ export async function regenerateAssetAction(input: {
     // Server-side limit enforcement — the browser is never trusted (ADR-0025).
     // Same three-call metering pattern as generateAssetsAction above: this
     // also calls deps.model.generateObject under the hood and was previously
-    // missing all of it (master instruction hard rule 11).
+    // missing all of it (master instruction hard rule 11). Phase 13: an
+    // atomic reservation (amount is always exactly 1 here, so there's no
+    // partial-settle case — either the job produces the one regenerated
+    // version, or it throws and the reservation is released in full).
     await usage.enforceAiUserLimit({ organizationId: org.id, userId: user.id, scope: 'content' });
-    await usage.enforceUsage({
+    const reservationKey = `content_regen_reserve:${input.assetId}:${randomUUID()}`;
+    await usage.reserveUsage({
       organizationId: org.id,
       meter: 'CONTENT_GENERATIONS',
       amount: 1,
-    });
-    const asset = await content.regenerateAssetJob({
-      organizationId: org.id,
-      userId: user.id,
-      assetId: input.assetId,
-      instructions: input.instructions,
-    });
-    await usage.recordUsage({
-      organizationId: org.id,
-      meter: 'CONTENT_GENERATIONS',
-      quantity: 1,
-      idempotencyKey: `content_regen:${input.assetId}:${asset?.currentVersion?.id ?? asset?.updatedAt.toISOString()}`,
+      idempotencyKey: reservationKey,
       actorId: user.id,
       subjectType: 'content_asset',
       subjectId: input.assetId,
     });
+    try {
+      await content.regenerateAssetJob({
+        organizationId: org.id,
+        userId: user.id,
+        assetId: input.assetId,
+        instructions: input.instructions,
+      });
+    } catch (e) {
+      await usage.releaseUsageReservation({
+        organizationId: org.id,
+        meter: 'CONTENT_GENERATIONS',
+        quantity: 1,
+        idempotencyKey: reservationKey,
+        reason: 'regeneration failed',
+      });
+      throw e;
+    }
     revalidatePath(`/app/content/${input.projectId}`);
     return { ok: true, message: 'Regenerated as a new version.' };
   } catch (e) {

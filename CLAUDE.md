@@ -1593,15 +1593,224 @@ vector`) — additive, no drops. Two shared-test-harness gaps found and
   paths are exercised only via their graceful-degradation branch, not
   against a real vector column. See `docs/KNOWLEDGE-INTELLIGENCE.md`,
   `docs/PHASE-11-REPORT.md`, ADR-0060.
+- **Enterprise security, reliability, governance & production hardening**
+  ✅ (operator's "Phase 12"): a 110-section brief covering essentially every
+  security/reliability domain, worked the same way every prior audit phase
+  was — inspect first via parallel audits, harden genuine gaps, never
+  rebuild what's already mature. Most of the brief's asks were already real
+  and previously audited (Phases 14/18/24/25/31); the closed gaps: **MFA**
+  (`auth/mfa.ts` — hand-rolled RFC 6238 TOTP + recovery codes, no
+  dependency, sealed with the existing AES-256-GCM envelope; disabling MFA
+  or regenerating recovery codes needs both a recent sign-in **and** a live
+  code; wired into Settings → Security, replacing the "Coming soon"
+  placeholder; **deliberately not wired into the sign-in flow itself** —
+  restructuring Auth.js's Credentials provider is a materially larger,
+  riskier change to an already-audited, live-verified path than this
+  phase's evidence justified, ADR-0061). **Rate-limit fail-closed**
+  (`checkRateLimit` gained an opt-in `failClosed` flag, applied only to
+  password login and password-reset-request — the two pure
+  credential-guessing surfaces; **magic-link send deliberately stays
+  fail-open**, since it's the sole sign-in/recovery path for every
+  passwordless account and failing closed there would trade a bounded abuse
+  risk for a total-lockout risk). **A Growth Missions kill switch**
+  (`MISSIONS_HALT`/`MISSIONS_HALT_ORG_IDS`, mirroring `CRAWLER_HALT`
+  exactly, checked in both the scheduled sweep and a manual "run this task
+  now" click). **A mission/AI-safety hardening batch**: per-mission AI
+  budget enforcement (previously never called in the missions module),
+  `maxRetries` actually wired to `MissionTask.create` (previously parsed
+  and discarded), a server-side replan throttle, real deadline/weekly-limit
+  stop conditions (classified via the existing Tool Registry `category`
+  field, no new tool-name list), idempotent task claims (conditional
+  `updateMany`, closing a concurrent-tick race), accurate `toolCallCount`
+  on every outcome not just success, a tool-execution timeout
+  (`AGENT_TOOL_TIMEOUT_MS`, honestly bounding the caller's wait, not the
+  underlying call), and the same class of race fixed in research-project
+  dispatch (`research/engine.ts`). **A real CI gap closed**:
+  `scripts/check-tenant-scope.mjs`'s allowlist had silently stopped
+  covering 21 tenant-scoped models introduced across five later phases —
+  fixed, surfacing one real gap (`missions/planner.ts`) and one correct
+  false positive (the cross-org user-deletion purge in
+  `organizations/lifecycle.ts`, marked with the linter's own opt-out
+  comment). **BullMQ retry configuration** — all 9 queues had zero
+  `defaultJobOptions` (silently `attempts:1`, no automatic retry anywhere);
+  now exponential backoff, with a longer-running variant for the crawl
+  queue. **A real readiness endpoint** (`GET /api/health/ready`, genuine
+  non-200 on `down`, reusing the same health-check logic; the existing
+  always-200 `/api/health` is unchanged — its liveness-only contract is
+  depended on by both Docker healthchecks). **Redis-AUTH required** in
+  strict env validation, mirroring the existing TLS requirement.
+  **Container hardening** (`cap_drop: [ALL]`, `no-new-privileges`) applied
+  to `docker-compose.production.yml` (a template) but **deliberately not
+  pushed to the live staging deployment** — an unverified capability change
+  to running infrastructure this session cannot redeploy is a materially
+  different risk than the same change to a template. **Real
+  incident-response and disaster-recovery documentation**:
+  `docs/INCIDENT-RESPONSE.md` (ten step-by-step runbooks, replacing one
+  paragraph) and `docs/DISASTER-RECOVERY.md` (four new scenarios beyond
+  `docs/DEPLOYMENT.md` §18's existing three) — both explicitly disclosed as
+  paper exercises, **never rehearsed as a live drill**.
+  `docs/SECURITY_POSTURE.md` (new) states outright that this application is
+  not "fully secure" or "enterprise certified," classifies 18 categories as
+  PASS / PASS WITH CONDITIONS / FAIL / NOT TESTED (no numeric score, per the
+  brief's explicit instruction), and carries a 10-item risk register with
+  no unresolved CRITICAL/HIGH hidden. A **fixed-in-passing test bug**: this
+  phase's own new `security/rate-limit.test.ts` tests exposed a real,
+  latent test-isolation bug — a mocked Redis client's `incr` was
+  permanently overwritten by an earlier "simulate an outage" test and never
+  restored, a bug the pre-existing "fails OPEN" test also had but avoided
+  detection by being the last `incr`-dependent test in the file. Gates
+  green: lint 14/14, typecheck 14/14, **`packages/services` 1376 tests**
+  (+20), tenant-scope clean, `check-env` script 12/12. **Verification
+  limit, disclosed**: no live restore drill, no live tabletop exercise of
+  the new runbooks, no live penetration test, no CodeQL/Semgrep/Trivy scan,
+  and no live Docker to verify the container-hardening YAML beyond syntax
+  validation — all in `docs/SECURITY_POSTURE.md`'s risk register, not
+  hidden. See `docs/SECURITY_POSTURE.md`, `docs/INCIDENT-RESPONSE.md`,
+  `docs/DISASTER-RECOVERY.md`, `docs/PHASE-12-REPORT.md`, ADR-0061. Per the
+  brief's own stop condition: Phase 13 (billing/usage/entitlements/
+  enterprise plans/subscriptions) and Phase 14 (final production
+  certification/launch readiness/deployment verification/go-live) are
+  **not** started.
+- **Billing, usage, entitlements & enterprise plans** ✅ (operator's
+  "Phase 13"): a 117-section commercial-platform brief worked the same
+  way as every prior audit phase — inspect first, harden genuine gaps,
+  never build a second billing/usage system. The mandatory audit found the
+  existing billing system (Phases 10/23/31) already implements almost
+  everything the brief describes under different names: a config-driven
+  plan catalog, a hand-rolled Stripe REST gateway, a `Subscription` mirror,
+  `Entitlement` rows with a PLAN/OVERRIDE/PROMO priority, an append-only
+  `UsageRecord` ledger rolled into `UsageCounter`, and a doubly-idempotent
+  webhook handler. The genuine gaps, closed: **atomic usage reservation**
+  (`usage/reserve.ts` — `reserveUsage`/`releaseUsageReservation` combine
+  check-and-increment into one atomic conditional `updateMany`, closing a
+  real TOCTOU race `enforceUsage` alone has under concurrency; migrated
+  onto `content-actions.ts`'s `generateAssetsAction`/`regenerateAssetAction`
+  as the two clearest examples, every other call site unchanged). **A real
+  concurrency bug hunt that fixed two genuine, previously-latent bugs in
+  the shared `testing/memory-db.ts` test harness**: a naive whole-database
+  `$transaction` snapshot/restore that could erase a *different*,
+  concurrently-committed transaction's write (replaced with a correct
+  per-row undo journal), and a `cmp()` helper where `4 === 4n` being
+  `false` in JS caused an exact-boundary usage check to wrongly reject a
+  claim that should have succeeded (reproduced as a real failing test —
+  4 successes instead of 5 under 10-concurrent-requests-vs-5-capacity —
+  before being root-caused and fixed). **A real billing worker queue**
+  (`apps/worker/src/processors/billing.ts`, three repeatable ticks) closing
+  a gap `docs/BILLING.md` had disclosed since Phase 23:
+  `runBillingReconcileJob`/`rebuildUsageCountersJob` existed since Phase 10
+  but were never actually scheduled; plus new `runUsageAlertsJob`
+  (80/90/100% usage-threshold notifications) and `runTrialEndingSoonJob`.
+  **A credit ledger** (`billing/credits.ts` — `CreditTransaction`, append
+  -only, `balanceAfter`-snapshotted, `grantCredits`/`consumeCredits`/
+  `adjustCredits`, all transactional, consumption refuses an overdraft)
+  scoped to the ledger primitive only — no purchase/checkout flow, since no
+  product surface sells credits today. **Enterprise contracts**
+  (`billing/enterprise.ts` — `EnterpriseContract`, layered into
+  `resolveEntitlements` between the plan default and a per-key
+  OVERRIDE/PROMO row, which still wins — "Enterprise does not mean
+  unrestricted"). **A pre-downgrade impact check** (`billing/
+downgrade-impact.ts::getDowngradeImpact`, read-only, surfaces which meters/
+  features would be affected before a customer confirms a downgrade — never
+  auto-blocks, never deletes data). **A seat summary**
+  (`getBillingSummary`'s new `seatSummary`: active/invited/limit/available,
+  contract- and override-aware, shown on `/app/billing`). Two new,
+  additive Prisma models (`CreditTransaction`, `EnterpriseContract`,
+  migration `20260930120000_billing_v2`). **Deliberately not built,
+  matching the brief's own scope discipline**: a coupon engine (Stripe's
+  own `allow_promotion_codes: true` already covers it), an in-app
+  refund/chargeback flow, tax calculation, multi-currency support, a
+  credit-to-usage automatic spillover integration, and an enterprise
+  -contract admin UI (the service functions are real and tested, callable
+  only from a script or a future admin action today). Gates green: lint
+  14/14, typecheck 14/14, `prisma validate` + `prisma generate` clean,
+  **`packages/services` 1403 tests** (+27 over Phase 12's 1376), web
+  build. See `docs/BILLING.md`,
+  `docs/PHASE-13-REPORT.md`, ADR-0062. Per the brief's own stop condition:
+  Phase 14 (final production certification/launch readiness/deployment
+  verification/go-live) is **not** started.
+- **Final production certification** ✅ (operator's "Phase 14"): the
+  brief's own AUDIT → TEST → FIX → VERIFY → CERTIFY cycle, applied with
+  explicit skepticism toward this project's own thirteen prior phases of
+  documentation ("do not trust documentation over implementation"). Fresh
+  gate re-run: lint 14/14, typecheck 14/14, `packages/services`
+  183 files / 1403 tests passing (confirmed stable across 3+ consecutive
+  full-suite runs, not a single green run); `check-tenant-scope.mjs` and
+  `audit-allow.mjs` both re-confirmed clean. A repo-wide mock/fake/
+  placeholder-data sweep and a live-secret-pattern sweep (`sk_live_`,
+  `sk_test_`, Google/GitHub key shapes) both came back clean — no
+  fabricated data, no committed credentials (also confirms the live
+  Stripe secret key the user pasted into chat earlier this session was
+  never written to any file). Three security claims were spot-checked
+  against **current code**, not just trusted from docs: AI tool
+  authorization (`assertCapabilityUsable`/`assertGovernanceAllows`
+  confirmed genuinely called inside `wordpress-tools.ts`, not just
+  described), `NODE_ENV=production` unconditional in both Dockerfiles
+  (confirming `AUTH_DEV_LOGIN`'s double-gate is unreachable in prod), and
+  container hardening (`cap_drop`/`no-new-privileges` present on
+  `docker-compose.production.yml`, **absent** from the live
+  `docker-compose.staging.yml` — a real, disclosed gap, not fixed this
+  phase to avoid an unverified change to running infrastructure).
+  **Two real bugs found and fixed** by refusing to dismiss an apparent
+  test flake: `missions/crud.test.ts`'s intermittent timeout was actually
+  `planMission`'s Phase 12 rate-limit check attempting a real 3-second
+  Redis connect-timeout with no mock in that test file (fixed with a
+  mock, matching the codebase's own established pattern); investigating
+  it surfaced **a genuine financial-correctness bug** in Phase 13's new
+  credit ledger — `currentBalance`'s `orderBy: {createdAt: 'desc'}` had no
+  tiebreaker, so two transactions written in the same millisecond (exactly
+  what a grant immediately followed by a consumption produces) could have
+  a stable sort return the *older*, wrong balance; fixed by adding `id`
+  (a time-ordered, tie-free cuid) as a secondary sort key, verified stable
+  across 3 consecutive full-suite runs. A scan of the same
+  no-tiebreaker-`orderBy` pattern found it in 42 files repo-wide; all
+  others were confirmed to be either list-display reads (a tie's order is
+  cosmetic) or a lookup against a column with a real uniqueness guarantee
+  (no tie possible) — `credits.ts` was the one genuine instance of the
+  dangerous shape (computing a *next* write's value from a *previous*
+  write in the same fast sequence). New deliverables:
+  `docs/PHASE-14-PRODUCTION-CERTIFICATION.md` (the detailed audit-evidence
+  trail, labeling every finding `[CODE]`/`[TEST]`/`[DOC]`/`[NOT TESTED]`
+  by how it was actually verified), `docs/PHASE-14-FINAL-CERTIFICATION.md`
+  (the formal 26-section report + a PASS/CONDITIONAL/NOT-TESTED scorecard
+  — deliberately not the brief's own literal PASS/FAIL binary, since
+  forcing an untested-live category into either would itself be
+  dishonest), `docs/PRODUCTION-RELEASE-CHECKLIST.md`,
+  `docs/GO-LIVE.md`, and `docs/runbooks/*.md` (15 files: application-down,
+  database-failure, redis-failure, worker-failure, oauth-failure,
+  youtube/tiktok/search-console outages, wordpress-failure,
+  stripe-webhook-failure, ai-provider-outage, security-incident,
+  data-breach-response, backup-restore, deployment-rollback). **Final
+  certification: CONDITIONAL** — no P0 blocker remains, but real OAuth
+  connections, a real Stripe test-mode cycle, real load/soak testing, a
+  real backup-restore drill, and a real deployment-rollback drill have
+  **never been executed against this platform in its entire development
+  history**, in this session or any prior one; the report recommends a
+  closed/invite-only beta first (matching Phase 18's own prior
+  recommendation), completing those specific live-verification steps
+  before general availability, matching the brief's own explicit
+  prohibition on claiming PRODUCTION READY without evidence. Per the
+  brief's own stop condition: no further development phase is started.
 - **Still outstanding:** Postgres **RLS** (ADR-0035, re-affirmed in
   ADR-0052 — application-layer scoping + the CI tenant-scope lint +
   integration tests, now actually running, remain the accepted mitigation);
   a full edge/IP rate-limit layer + aggregate magic-link cap and a strict
   nonce-based CSP (Phase 2 added Redis-backed limits on the auth/session
-  paths it touched, not a repo-wide edge layer); MFA enrollment/verification
-  UI (the data model — `UserMfaFactor` — exists, unused); automated
+  paths it touched, not a repo-wide edge layer); **closed by Phase 12** —
+  MFA enrollment/verification/recovery-codes UI is now real
+  (`auth/mfa.ts` + Settings → Security), but it is not wired into the
+  sign-in flow itself, `PlatformStaff` accounts are not required to enable
+  it, and passkeys/WebAuthn remain the one still-unimplemented factor type
+  (`RISK-AUTH-1`/`RISK-ADMIN-1`, `docs/SECURITY_POSTURE.md`); automated
   alerting on security events (`REPEATED_LOGIN_FAILURE` etc. are recorded,
-  nothing pages on them yet); a tier-enforcement edge layer; the bespoke
+  nothing pages on them yet — `RISK-ALERT-1`); a real restore drill against
+  the backup/restore scripts (never executed, `RISK-DR-1`,
+  `docs/DISASTER-RECOVERY.md`); a live tabletop rehearsal of the new
+  `docs/INCIDENT-RESPONSE.md` runbooks (`RISK-IR-1`); per-admin-page-view
+  audit logging (`RISK-ADMIN-2`); pushing the Phase 12 container-hardening
+  compose changes to the live staging deployment (`RISK-INFRA-1`); a
+  concrete Postgres RLS implementation against a real database (ADR-0061 §5
+  now sketches the `withTenant()`/`FORCE RLS` design, still unbuilt); a
+  tier-enforcement edge layer; the bespoke
   per-screen redesigns Phase 3 deliberately deferred (YouTube video-detail
   AI panels, a split content-editor workspace, a visual automation builder,
   a context panel, a content calendar, onboarding); a full WCAG 2.2 AA

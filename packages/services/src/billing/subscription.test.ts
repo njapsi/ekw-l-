@@ -54,6 +54,7 @@ function makeDb(seed: Partial<Record<string, unknown>> = {}) {
     usageCounter: { findMany: vi.fn(async () => []) },
     usageRecord: { aggregate: vi.fn(async () => ({ _sum: { quantity: null } })) },
     membership: { count: vi.fn(async () => 1) },
+    invitation: { count: vi.fn(async () => 0) },
     oAuthConnection: { count: vi.fn(async () => 0) },
     // WordPress sites also count as connected accounts (ADR-0051).
     wordPressSite: { count: vi.fn(async () => 0) },
@@ -147,5 +148,6 @@ describe('getBillingSummary', () => {
     expect(s.plans.map((p) => p.tier)).toEqual(['FREE', 'CREATOR', 'PRO', 'AGENCY', 'ENTERPRISE']);
     expect(s.usage.meters.length).toBeGreaterThan(0);
     expect(s.invoices).toEqual([]);
+    expect(s.seatSummary).toEqual({ active: 1, invited: 0, limit: 1, available: 0 });
   });
 });

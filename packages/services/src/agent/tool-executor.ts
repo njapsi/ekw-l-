@@ -25,7 +25,7 @@ import type { Db } from '@growth-agent/db';
 import { prisma } from '@growth-agent/db';
 import { checkUsage, recordUsage } from '../usage/index.js';
 import { checkRateLimit } from '../security/rate-limit.js';
-import type { AppError } from '../errors.js';
+import { AppError } from '../errors.js';
 import { isAppError } from '../errors.js';
 import { recordAgentRunEvent } from './events.js';
 import {
@@ -49,6 +49,31 @@ export interface ToolExecutionContext {
   db?: Db;
   /** Attaches every event this call records to an existing turn's timeline. */
   agentRunId?: string;
+}
+
+/**
+ * Phase 12 hardening (§16/§54 — "no tool should be allowed to run
+ * indefinitely"): every dispatched tool call now has a hard wall-clock
+ * deadline. Before this, nothing here bounded a tool's own `execute()` —
+ * a hung third-party API call (no timeout in the WordPress/YouTube/TikTok
+ * SDK layer, confirmed absent by audit) blocked the whole agent turn or
+ * mission tick with no backstop.
+ *
+ * Caveat, disclosed rather than hidden: this bounds how long the *caller*
+ * waits — it rejects the race, not the underlying call. Node has no way to
+ * force-cancel an in-flight `await` that isn't itself listening for an
+ * abort signal, and today's `execute()` functions don't take one (the same
+ * gap `packages/ai`'s tool-calling loop has). A timed-out call may still be
+ * running server-side after this returns `UNAVAILABLE`; it cannot, however,
+ * write anything the caller trusts, since the caller has already moved on.
+ */
+const TOOL_TIMEOUT_MS = Number(process.env.AGENT_TOOL_TIMEOUT_MS) || 45_000;
+
+class ToolTimeoutError extends AppError {
+  constructor(toolName: string, ms: number) {
+    super('provider_unavailable', `Tool "${toolName}" did not complete within ${ms}ms.`, { expose: true });
+    this.name = 'ToolTimeoutError';
+  }
 }
 
 const NATIVE_NAMES = new Set<string>(INTEGRATION_TOOL_NAMES);
@@ -216,8 +241,10 @@ export async function executeAgentTool(
   await recordEvent(ctx, db, 'TOOL_AUTHORIZATION_CHECK', { tool: toolName });
   await recordEvent(ctx, db, 'TOOL_STARTED', { tool: toolName });
 
-  let envelope: ToolResultEnvelope;
-  try {
+  async function dispatch(): Promise<ToolResultEnvelope> {
+    if (kind === 'mcp') {
+      return executeMcpTool(ctx.organizationId, toolName, (rawInput ?? {}) as Record<string, unknown>, db);
+    }
     let data: unknown;
     if (kind === 'native') {
       const nativeCtx: IntegrationToolContext = {
@@ -256,25 +283,25 @@ export async function executeAgentTool(
         db,
       };
       data = await runResearchProjectTool(toolName, researchCtx, rawInput);
-    } else if (kind === 'knowledge') {
+    } else {
       const knowledgeCtx: IntegrationToolContext = {
         organizationId: ctx.organizationId,
         userId: ctx.userId,
         db,
       };
       data = await runKnowledgeTool(toolName, knowledgeCtx, rawInput);
-    } else {
-      envelope = await executeMcpTool(
-        ctx.organizationId,
-        toolName,
-        (rawInput ?? {}) as Record<string, unknown>,
-        db,
-      );
-      await finalizeEvent(ctx, db, toolName, envelope);
-      await meterCall(ctx, db, toolName, envelope, correlationId);
-      return envelope;
     }
-    envelope = success({ tool: toolName, provider, durationMs: Date.now() - start, data });
+    return success({ tool: toolName, provider, durationMs: Date.now() - start, data });
+  }
+
+  let envelope: ToolResultEnvelope;
+  try {
+    envelope = await Promise.race([
+      dispatch(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new ToolTimeoutError(toolName, TOOL_TIMEOUT_MS)), TOOL_TIMEOUT_MS),
+      ),
+    ]);
   } catch (e) {
     envelope = envelopeFromError(toolName, provider, Date.now() - start, e, correlationId);
   }

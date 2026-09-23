@@ -6,6 +6,7 @@ function base(overrides: Partial<StopEvaluationInput> = {}): StopEvaluationInput
   return {
     status: 'ACTIVE',
     targetDate: null,
+    activatedAt: null,
     now: new Date('2026-01-15T00:00:00Z'),
     limits: DEFAULT_MISSION_LIMITS,
     toolCallCount: 0,
@@ -15,6 +16,8 @@ function base(overrides: Partial<StopEvaluationInput> = {}): StopEvaluationInput
     loopFailureCount: 0,
     allSuccessMetricsMet: false,
     requiredIntegrationDisconnected: false,
+    publishesInLast7Days: 0,
+    contentGenerationsInLast7Days: 0,
     ...overrides,
   };
 }
@@ -73,6 +76,45 @@ describe('evaluateStopConditions', () => {
   it('REPEATED_FAILURE after 5 consecutive loop failures', () => {
     expect(evaluateStopConditions(base({ loopFailureCount: 5 }))).toBe('REPEATED_FAILURE');
     expect(evaluateStopConditions(base({ loopFailureCount: 4 }))).toBeNull();
+  });
+
+  it('DEADLINE_REACHED once maxDurationDays has elapsed since activation, even with no targetDate', () => {
+    const limits = { ...DEFAULT_MISSION_LIMITS, maxDurationDays: 10 };
+    const result = evaluateStopConditions(
+      base({
+        limits,
+        targetDate: null,
+        activatedAt: new Date('2026-01-01T00:00:00Z'),
+        now: new Date('2026-01-11T00:00:01Z'),
+      }),
+    );
+    expect(result).toBe('DEADLINE_REACHED');
+  });
+
+  it('not yet DEADLINE_REACHED before maxDurationDays has elapsed', () => {
+    const limits = { ...DEFAULT_MISSION_LIMITS, maxDurationDays: 10 };
+    const result = evaluateStopConditions(
+      base({
+        limits,
+        targetDate: null,
+        activatedAt: new Date('2026-01-01T00:00:00Z'),
+        now: new Date('2026-01-05T00:00:00Z'),
+      }),
+    );
+    expect(result).toBeNull();
+  });
+
+  it('WEEKLY_LIMIT_REACHED once the configured weekly publish cap is hit', () => {
+    const limits = { ...DEFAULT_MISSION_LIMITS, maxPublishPerWeek: 2 };
+    expect(evaluateStopConditions(base({ limits, publishesInLast7Days: 2 }))).toBe('WEEKLY_LIMIT_REACHED');
+    expect(evaluateStopConditions(base({ limits, publishesInLast7Days: 1 }))).toBeNull();
+  });
+
+  it('WEEKLY_LIMIT_REACHED once the configured weekly content-generation cap is hit', () => {
+    const limits = { ...DEFAULT_MISSION_LIMITS, maxContentGenerationsPerWeek: 3 };
+    expect(
+      evaluateStopConditions(base({ limits, contentGenerationsInLast7Days: 3 })),
+    ).toBe('WEEKLY_LIMIT_REACHED');
   });
 
   it('a lagging metric that has not moved yet does not, by itself, stop the mission (§10)', () => {

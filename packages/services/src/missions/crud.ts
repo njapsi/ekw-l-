@@ -18,6 +18,7 @@ import { recordAudit } from '../audit/index.js';
 import { AppError } from '../errors.js';
 import { createNotification } from '../notifications/index.js';
 import { authorize } from '../rbac/authorize.js';
+import { checkRateLimit } from '../security/rate-limit.js';
 import { detectPlatformOverlap } from './conflict.js';
 import { recordMissionEvent } from './events.js';
 import { generateMissionPlan, type PlannerModel } from './planner.js';
@@ -159,6 +160,27 @@ export async function planMission(
   const mission = await getMission(input.organizationId, input.missionId, db);
   if (mission.status !== 'DRAFT' && mission.status !== 'AWAITING_APPROVAL') {
     throw AppError.conflict(`A mission that is ${mission.status.toLowerCase()} cannot be (re)planned.`);
+  }
+  // Part 20 (runaway-loop protection): enforced here, in the service
+  // function itself, not only at the Server Action layer — `planMission`
+  // re-runs a real `generateObject` call and rewrites the whole task graph,
+  // and a successful plan leaves the mission back in `AWAITING_APPROVAL`,
+  // which is itself a legal state to call `planMission` from again. Without
+  // a server-side floor, any caller of this function directly (a future API
+  // route, a worker job, a buggy retry loop) — not just the one UI Server
+  // Action that happens to rate-limit itself today — could replan in a
+  // tight loop with no cap at all.
+  const replanLimit = await checkRateLimit({
+    key: `mission-replan:${mission.id}`,
+    limit: 10,
+    windowSec: 3600,
+  });
+  if (!replanLimit.ok) {
+    throw new AppError(
+      'rate_limited',
+      'This mission has been (re)planned too many times in the last hour. Wait a while and try again.',
+      { expose: true },
+    );
   }
   await db.growthMission.update({ where: { id: mission.id }, data: { status: 'PLANNING' } });
 

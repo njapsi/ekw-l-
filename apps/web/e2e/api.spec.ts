@@ -64,6 +64,20 @@ test.describe('GET /api/health', () => {
   });
 });
 
+test.describe('GET /api/health/ready', () => {
+  test('returns a real HTTP status (not always-200) for the same dependency report (Phase 12)', async ({
+    request,
+  }) => {
+    const res = await request.get('/api/health/ready');
+    expect([200, 503]).toContain(res.status());
+    expect(res.headers()['cache-control']).toContain('no-store');
+    const body = (await res.json()) as { status: string; checks: unknown[] };
+    expect(['ok', 'degraded', 'down']).toContain(body.status);
+    // "down" must fail the gate; anything else must pass it.
+    expect(res.status()).toBe(body.status === 'down' ? 503 : 200);
+  });
+});
+
 test.describe('GET /api/metrics', () => {
   test('anonymous is forbidden', async ({ request }) => {
     const res = await request.get('/api/metrics', { maxRedirects: 0 });
