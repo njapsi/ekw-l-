@@ -62,6 +62,17 @@ const TENANT_MODELS = new Set([
   'notification',
   'searchConsoleSite',
   'searchConsoleSnapshot',
+  'knowledgeSource',
+  'knowledgeItem',
+  'knowledgeEvidence',
+  'knowledgeEmbedding',
+  'knowledgeRelation',
+  'knowledgeConflict',
+  'memoryCandidate',
+  'researchProject',
+  'researchQuery',
+  'researchFinding',
+  'researchCitation',
 ]);
 
 const RISKY = 'findMany|findFirst|updateMany|deleteMany|aggregate|groupBy|count';

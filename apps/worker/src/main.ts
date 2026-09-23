@@ -109,7 +109,39 @@ async function registerSchedules(): Promise<void> {
     { type: 'mission.weekly.review' },
     { repeat: { every: 7 * 86_400_000 }, jobId: 'mission-weekly-review', removeOnComplete: 10, removeOnFail: 10 },
   );
-  logger.info('automation + lifecycle + integration + mission scheduler ticks registered');
+  // Phase 11: Knowledge/Research maintenance, on the same agent-run queue.
+  // `research-dispatch-sweep` is the real "runs asynchronously" mechanism
+  // for research projects (this codebase has no web→worker job producer
+  // anywhere — see `research/jobs.ts`'s own comment) — frequent, like
+  // mission-sweep, so a newly requested project starts promptly.
+  await agentRunQueue.add(
+    'research-dispatch-sweep',
+    { type: 'research.dispatch.sweep' },
+    { repeat: { every: 30_000 }, jobId: 'research-dispatch-sweep', removeOnComplete: 50, removeOnFail: 50 },
+  );
+  await agentRunQueue.add(
+    'research-cleanup',
+    { type: 'research.cleanup' },
+    { repeat: { every: 3_600_000 }, jobId: 'research-cleanup', removeOnComplete: 20, removeOnFail: 20 },
+  );
+  await agentRunQueue.add(
+    'knowledge-freshness-check',
+    { type: 'knowledge.freshness.check' },
+    { repeat: { every: 3_600_000 }, jobId: 'knowledge-freshness-check', removeOnComplete: 20, removeOnFail: 20 },
+  );
+  await agentRunQueue.add(
+    'knowledge-conflict-detect',
+    { type: 'knowledge.conflict.detect' },
+    { repeat: { every: 4 * 3_600_000 }, jobId: 'knowledge-conflict-detect', removeOnComplete: 20, removeOnFail: 20 },
+  );
+  await agentRunQueue.add(
+    'memory-expire',
+    { type: 'memory.expire' },
+    { repeat: { every: 86_400_000 }, jobId: 'memory-expire', removeOnComplete: 10, removeOnFail: 10 },
+  );
+  logger.info(
+    'automation + lifecycle + integration + mission + knowledge/research scheduler ticks registered',
+  );
 }
 
 function startWorker(name: string, processor: Processor) {

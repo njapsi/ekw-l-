@@ -2,11 +2,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 const generateTextMock = vi.fn();
+const embedManyMock = vi.fn();
 
 vi.mock('ai', () => ({
   generateText: (...args: unknown[]) => generateTextMock(...args),
   generateObject: vi.fn(),
   streamText: vi.fn(),
+  embedMany: (...args: unknown[]) => embedManyMock(...args),
   tool: (def: unknown) => def,
 }));
 
@@ -84,5 +86,54 @@ describe('VercelAIProvider.generateText with tools', () => {
     });
     const call = generateTextMock.mock.calls[0]![0] as Record<string, unknown>;
     expect(call.maxSteps).toBe(1);
+  });
+});
+
+describe('VercelAIProvider.embed', () => {
+  beforeEach(() => {
+    embedManyMock.mockClear();
+  });
+
+  it('is undefined when the provider was constructed without embedding support', async () => {
+    const { VercelAIProvider } = await import('./vercel.js');
+    const provider = new VercelAIProvider('anthropic', () => ({}) as never, 'claude-x');
+    expect(provider.embed).toBeUndefined();
+  });
+
+  it('resolves the embedding model, calls embedMany, and returns a priced usage record', async () => {
+    embedManyMock.mockResolvedValue({
+      embeddings: [
+        [0.1, 0.2],
+        [0.3, 0.4],
+      ],
+      usage: { tokens: 12 },
+    });
+    const resolve = vi.fn(() => ({}) as never);
+    const { VercelAIProvider } = await import('./vercel.js');
+    const provider = new VercelAIProvider('openai', () => ({}) as never, 'gpt-4o-mini', {
+      resolve,
+      defaultModelId: 'text-embedding-3-small',
+    });
+    expect(provider.embed).toBeTypeOf('function');
+    const result = await provider.embed!({ values: ['a', 'b'] });
+    expect(resolve).toHaveBeenCalledWith('text-embedding-3-small');
+    expect(embedManyMock).toHaveBeenCalledWith(
+      expect.objectContaining({ values: ['a', 'b'] }),
+    );
+    expect(result.embeddings).toHaveLength(2);
+    expect(result.usage).toMatchObject({ provider: 'openai', model: 'text-embedding-3-small', promptTokens: 12 });
+    expect(result.usage.estimatedCostUsd).toBeGreaterThan(0);
+  });
+
+  it('uses an explicit per-call model override instead of the default', async () => {
+    embedManyMock.mockResolvedValue({ embeddings: [[0.1]], usage: { tokens: 3 } });
+    const resolve = vi.fn(() => ({}) as never);
+    const { VercelAIProvider } = await import('./vercel.js');
+    const provider = new VercelAIProvider('openai', () => ({}) as never, 'gpt-4o-mini', {
+      resolve,
+      defaultModelId: 'text-embedding-3-small',
+    });
+    await provider.embed!({ values: ['x'], model: { provider: 'openai', model: 'text-embedding-3-large' } });
+    expect(resolve).toHaveBeenCalledWith('text-embedding-3-large');
   });
 });

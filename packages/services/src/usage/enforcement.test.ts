@@ -49,7 +49,8 @@ function makeDb(opts: {
 const isLimitError = (e: unknown) => isAppError(e) && e.code === 'usage_limit_exceeded';
 
 // The metered resources requiring enforcement (SEATS is a gauge exercised
-// elsewhere via invitations). TOOL_CALLS added Phase 5.
+// elsewhere via invitations). TOOL_CALLS added Phase 5, RESEARCH_CALLS
+// added Phase 11.
 const REQUIRED: MeterKey[] = [
   'AI_REQUESTS',
   'AI_TOKENS',
@@ -59,6 +60,7 @@ const REQUIRED: MeterKey[] = [
   'REPORTS',
   'CONTENT_GENERATIONS',
   'TOOL_CALLS',
+  'RESEARCH_CALLS',
 ];
 
 describe('enforceUsage — over-limit is refused for every metered resource', () => {
@@ -130,6 +132,7 @@ describe('enforceUsage — over-limit is refused for every metered resource', ()
         'CONTENT_GENERATIONS',
         'SEATS',
         'TOOL_CALLS',
+        'RESEARCH_CALLS',
       ]),
     );
   });

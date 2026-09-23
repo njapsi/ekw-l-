@@ -20,7 +20,8 @@ import { createNotification } from '../notifications/index.js';
 import { authorize } from '../rbac/authorize.js';
 import { detectPlatformOverlap } from './conflict.js';
 import { recordMissionEvent } from './events.js';
-import { generateMissionPlan } from './planner.js';
+import { generateMissionPlan, type PlannerModel } from './planner.js';
+import type { EmbeddingCapableModel } from '../knowledge/embeddings.js';
 import {
   CreateMissionInputSchema,
   MissionApprovalPolicySchema,
@@ -142,7 +143,16 @@ export async function getMissionDetail(organizationId: string, missionId: string
  *  AWAITING_APPROVAL — the plan is generated but nothing executes yet
  *  (§7/§48: the user must explicitly activate). */
 export async function planMission(
-  input: { organizationId: string; userId: string; missionId: string },
+  input: {
+    organizationId: string;
+    userId: string;
+    missionId: string;
+    /** Phase 11: optional model/embedding deps so the plan is knowledge
+     * -aware and can refine its narrative — omitted, planning stays fully
+     * deterministic exactly as it did before this phase. */
+    model?: PlannerModel;
+    embeddingModel?: EmbeddingCapableModel;
+  },
   db: Db = prisma,
 ) {
   await assertMissionOwnerMay(input.userId, input.organizationId, db);
@@ -152,7 +162,15 @@ export async function planMission(
   }
   await db.growthMission.update({ where: { id: mission.id }, data: { status: 'PLANNING' } });
 
-  const plan = await generateMissionPlan({ organizationId: input.organizationId, mission }, db);
+  const plan = await generateMissionPlan(
+    {
+      organizationId: input.organizationId,
+      mission,
+      model: input.model,
+      embeddingModel: input.embeddingModel,
+    },
+    db,
+  );
 
   await db.growthMission.update({
     where: { id: mission.id },

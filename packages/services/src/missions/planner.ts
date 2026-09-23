@@ -18,6 +18,9 @@ import { loadOrgContext, type OrgContext } from '../agent/context.js';
 import { findRefreshCandidates } from '../wordpress/content-refresh.js';
 import { listWebsites } from '../seo/read.js';
 import { UNTRUSTED_CONTENT_SYSTEM_CLAUSE, wrapUntrusted } from '../security/untrusted.js';
+import { retrieveKnowledge, type RetrievedKnowledge } from '../knowledge/retrieval.js';
+import type { EmbeddingCapableModel } from '../knowledge/embeddings.js';
+import { listRecentLearnings } from './learning.js';
 import { hasCycle } from './task-graph.js';
 import {
   MissionStrategySchema,
@@ -271,6 +274,50 @@ async function buildDraft(
   return { milestones, evidence, assumptions, risks };
 }
 
+/**
+ * Phase 11, Part 45/85: "before mission planning, retrieve relevant
+ * organization knowledge / historical missions / experiments / lessons."
+ * Reuses `knowledge/retrieval.ts` and `missions/learning.ts::listRecentLearnings`
+ * — no new read path, no duplicated storage. A FACT/USER_PROVIDED/
+ * SYSTEM_OBSERVED/EXTERNAL_SOURCE knowledge item is treated as evidence; an
+ * INFERENCE/HYPOTHESIS/OPINION one is treated as an assumption (Part 5's own
+ * distinction, applied here too) — never blurred into a single "context" bag.
+ */
+async function gatherKnowledgeContext(
+  organizationId: string,
+  missionId: string,
+  objective: string,
+  embeddingModel: EmbeddingCapableModel | undefined,
+  db: Db,
+): Promise<{ evidence: string[]; assumptions: string[]; priorLearnings: string[] }> {
+  const [knowledge, learnings] = await Promise.all([
+    retrieveKnowledge(organizationId, objective, { limit: 6 }, embeddingModel, db).catch(
+      () => [] as RetrievedKnowledge[],
+    ),
+    listRecentLearnings(organizationId, { limit: 6, excludeMissionId: missionId }, db).catch(() => []),
+  ]);
+
+  const evidence: string[] = [];
+  const assumptions: string[] = [];
+  for (const k of knowledge) {
+    const line = `${k.title}: ${k.summary ?? k.content.slice(0, 200)}`;
+    if (
+      k.classification === 'FACT' ||
+      k.classification === 'USER_PROVIDED' ||
+      k.classification === 'SYSTEM_OBSERVED' ||
+      k.classification === 'EXTERNAL_SOURCE'
+    ) {
+      evidence.push(`[stored knowledge] ${line}`);
+    } else {
+      assumptions.push(`[unverified] ${line}`);
+    }
+  }
+  const priorLearnings = learnings.map(
+    (l) => `[${l.type}${l.mission?.name ? `, from "${l.mission.name}"` : ''}] ${l.title}: ${l.detail.slice(0, 200)}`,
+  );
+  return { evidence, assumptions, priorLearnings };
+}
+
 const ModelStrategyOutput = z.object({
   narrative: z.string().min(1).max(1_500),
   currentState: z.string().min(1).max(800),
@@ -279,14 +326,14 @@ const ModelStrategyOutput = z.object({
 
 async function refineNarrative(
   model: PlannerModel | undefined,
-  input: { objective: string; evidence: string[]; assumptions: string[] },
+  input: { objective: string; evidence: string[]; assumptions: string[]; priorLearnings: string[] },
 ): Promise<{ narrative: string; currentState: string; targetState: string; grounded: boolean } | null> {
   if (!model) return null;
   try {
     const res = await model.generateObject({
       schema: ModelStrategyOutput,
-      system: `You write a short, factual growth-mission strategy summary from real evidence only. Never invent a number or claim a result is guaranteed. Do not reveal chain-of-thought — three short fields only.\n\n${UNTRUSTED_CONTENT_SYSTEM_CLAUSE}`,
-      prompt: `OBJECTIVE: ${input.objective}\n\n${wrapUntrusted('EVIDENCE', input.evidence.join('\n') || 'none')}\n\n${wrapUntrusted('ASSUMPTIONS', input.assumptions.join('\n') || 'none')}\n\nWrite narrative/currentState/targetState.`,
+      system: `You write a short, factual growth-mission strategy summary from real evidence only. Never invent a number or claim a result is guaranteed. If a PRIOR LESSON is directly relevant, you may reference it, but never present a HYPOTHESIS-labelled lesson as a proven fact. Do not reveal chain-of-thought — three short fields only.\n\n${UNTRUSTED_CONTENT_SYSTEM_CLAUSE}`,
+      prompt: `OBJECTIVE: ${input.objective}\n\n${wrapUntrusted('EVIDENCE', input.evidence.join('\n') || 'none')}\n\n${wrapUntrusted('ASSUMPTIONS', input.assumptions.join('\n') || 'none')}\n\n${wrapUntrusted('PRIOR_LESSONS', input.priorLearnings.join('\n') || 'none')}\n\nWrite narrative/currentState/targetState.`,
     });
     return { ...res.object, grounded: true };
   } catch {
@@ -305,10 +352,22 @@ export async function generateMissionPlan(
     organizationId: string;
     mission: { id: string; objective: string; allowedPlatforms: MissionPlatformKey[] };
     model?: PlannerModel;
+    embeddingModel?: EmbeddingCapableModel;
   },
   db: Db = prisma,
 ): Promise<GeneratedPlan> {
-  const draft = await buildDraft(input.organizationId, input.mission.allowedPlatforms, db);
+  const [draft, knowledgeContext] = await Promise.all([
+    buildDraft(input.organizationId, input.mission.allowedPlatforms, db),
+    gatherKnowledgeContext(
+      input.organizationId,
+      input.mission.id,
+      input.mission.objective,
+      input.embeddingModel,
+      db,
+    ),
+  ]);
+  draft.evidence = [...draft.evidence, ...knowledgeContext.evidence];
+  draft.assumptions = [...draft.assumptions, ...knowledgeContext.assumptions];
 
   // Defensive: the planner above only ever adds forward dependency edges
   // (a task depends on an earlier task within the same or an earlier
@@ -377,6 +436,7 @@ export async function generateMissionPlan(
     objective: input.mission.objective,
     evidence: draft.evidence,
     assumptions: draft.assumptions,
+    priorLearnings: knowledgeContext.priorLearnings,
   });
 
   const strategy = MissionStrategySchema.parse({

@@ -297,6 +297,28 @@ is constrained by the `MemoryExtraction` schema (no free-form kinds) and its
 output is re-validated by the same guards. Memory rows are deduped on
 `(organizationId, userId, kind, label)` and can carry an `expiresAt`.
 
+**Implemented (Phase 11) — the knowledge layer + Context Assembly Engine.**
+This section's original "Semantic memory" row planned embeddings of
+`Finding`/`Recommendation`/`CrawlIssue` summaries; what actually shipped is
+broader and typed: a new `KnowledgeItem` model (35 types, org/user/mission
+scope, a 7-value fact/inference/hypothesis/opinion classification, 9-value
+status, per-type freshness) with `KnowledgeEmbedding` chunks
+(`vector(1536)`, real only when `OPENAI_API_KEY` is configured — see §1's
+resilience/roles section, the `'embedding'` role now has a concrete
+`embed()` behind it for the first time). `agent/context-assembly.ts`'s
+`assembleAgentContext` is the actual, single place context is assembled
+for a growth-agent turn or a mission plan — composing `OrgContext` +
+`AgentMemory` (both unchanged) with hybrid-retrieved knowledge
+(`knowledge·0.30 + vector·0.30 + importance·0.15 + confidence·0.15 +
+recency·0.10` — never ranked by vector similarity alone), recent completed
+research, and cross-mission learnings. Retrieved knowledge is folded into
+the orchestrator's existing evidence catalogue via `evidenceKindFor`,
+mapping the 7-value classification onto this doc's own `Claim` tagging
+(`fact`/`calculated_metric`/`assumption`/`prediction`/`recommendation`) —
+a stored hypothesis is graded by the identical grounding check
+(`checkGroundingFields`) a capability's own evidence already is, never a
+second tagging system. See `docs/KNOWLEDGE-INTELLIGENCE.md`, ADR-0060.
+
 **Prompt-injection stance:** crawled page content, video metadata, API
 payloads, and user-supplied text are **untrusted data**. They are never
 concatenated into the instruction channel as commands, never allowed to change

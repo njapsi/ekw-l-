@@ -34,7 +34,32 @@ function eq(a: unknown, b: unknown): boolean {
   return a === b;
 }
 
+/** Prisma's string filter shape (`{ contains | equals | startsWith | endsWith,
+ *  mode?: 'insensitive' }`) — a real operator real code uses (knowledge
+ *  search, memory-candidate dedupe) that the original OPS set above never
+ *  covered, silently matching nothing instead of erroring. */
+function matchStringFilter(actual: unknown, filter: Record<string, unknown>): boolean | null {
+  const stringOps = ['contains', 'equals', 'startsWith', 'endsWith'] as const;
+  const op = stringOps.find((k) => k in filter);
+  if (!op) return null;
+  if (typeof actual !== 'string' && actual !== null && actual !== undefined) return null;
+  if (typeof filter[op] !== 'string') return null;
+  const insensitive = filter.mode === 'insensitive';
+  const hay = actual ?? '';
+  const needle = filter[op];
+  const a = insensitive ? hay.toLowerCase() : hay;
+  const b = insensitive ? needle.toLowerCase() : needle;
+  if (op === 'contains') return a.includes(b);
+  if (op === 'equals') return a === b;
+  if (op === 'startsWith') return a.startsWith(b);
+  return a.endsWith(b);
+}
+
 function matchValue(actual: unknown, filter: unknown): boolean {
+  if (isPlainObject(filter)) {
+    const stringMatch = matchStringFilter(actual, filter);
+    if (stringMatch !== null) return stringMatch;
+  }
   if (isPlainObject(filter) && Object.keys(filter).every((k) => OPS.has(k))) {
     for (const [op, v] of Object.entries(filter)) {
       if (op === 'not' && (isPlainObject(v) ? matchValue(actual, v) : eq(actual, v))) return false;
@@ -270,6 +295,14 @@ export function createMemoryDb() {
     crawl: model('crl', () => ({})),
     task: model('tsk', () => ({ status: 'PENDING' })),
     recommendation: model('rec', () => ({})),
+    orgMemory: model('omm', () => ({
+      userId: null,
+      label: null,
+      sourceType: 'manual',
+      sourceId: null,
+      confidence: 1,
+      expiresAt: null,
+    })),
     // Phase 2 identity models.
     aiGovernancePolicy: model('gov', () => ({})),
     user: model('usr', () => ({
@@ -359,6 +392,76 @@ export function createMemoryDb() {
       relatedTaskId: null,
     })),
     missionEvent: model('mev', () => ({ metadata: null })),
+    // Phase 11 — Memory, Research & Knowledge Intelligence.
+    knowledgeSource: model('ksr', () => ({
+      url: null,
+      title: null,
+      publisher: null,
+      author: null,
+      publishedAt: null,
+      lastVerifiedAt: null,
+      contentHash: null,
+      trustLevel: 'UNKNOWN',
+      metadata: null,
+    })),
+    knowledgeItem: model('kit', () => ({
+      createdById: null,
+      missionId: null,
+      scope: 'ORGANIZATION',
+      summary: null,
+      classification: 'SYSTEM_OBSERVED',
+      confidence: 0.5,
+      importance: 'MEDIUM',
+      status: 'DRAFT',
+      primarySourceId: null,
+      freshnessPolicy: 'medium',
+      expiresAt: null,
+      lastVerifiedAt: null,
+      lastUsedAt: null,
+      metadata: null,
+    })),
+    knowledgeEvidence: model('kev', () => ({ location: null, confidence: 0.5 })),
+    knowledgeEmbedding: model('kem', () => ({
+      chunkIndex: 0,
+      chunkMetadata: null,
+      embeddingModel: null,
+      embeddingVersion: null,
+    })),
+    knowledgeRelation: model('krl', () => ({})),
+    knowledgeConflict: model('kcf', () => ({
+      status: 'OPEN',
+      resolution: null,
+      resolvedById: null,
+      resolvedAt: null,
+      detectedAt: new Date(),
+    })),
+    memoryCandidate: model('mcd', () => ({
+      userId: null,
+      conversationId: null,
+      classification: 'USER_PROVIDED',
+      scope: 'ORGANIZATION',
+      importance: 'MEDIUM',
+      confidence: 0.6,
+      status: 'PENDING',
+      resolvedKnowledgeId: null,
+      resolvedById: null,
+      resolvedAt: null,
+    })),
+    researchProject: model('rsp', () => ({
+      missionId: null,
+      objective: null,
+      scope: null,
+      status: 'REQUESTED',
+      config: null,
+      conclusion: null,
+      confidence: null,
+      failureReason: null,
+      startedAt: null,
+      completedAt: null,
+    })),
+    researchQuery: model('rsq', () => ({ executedAt: null, resultCount: 0 })),
+    researchFinding: model('rsf', () => ({ sourceId: null, confidence: 0.5, conflictsWithFindingId: null })),
+    researchCitation: model('rsc', () => ({ findingId: null, quote: null })),
   };
   return db;
 }

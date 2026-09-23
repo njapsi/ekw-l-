@@ -6,6 +6,133 @@ reversal gets a new ADR that supersedes the old one.
 
 ---
 
+## ADR-0060 — Memory, Research & Knowledge Intelligence: a new typed knowledge layer above the untouched `OrgMemory`/`MissionLearning`, a real OpenAI-only embedding provider with keyword-first hybrid retrieval, and URL-driven (not search-driven) research, all dispatched through the existing Tool Registry/Policy Engine
+
+**Context.** Phase 11 asked for organization/mission memory, a research
+engine, a knowledge base, hybrid retrieval, evidence/citations, freshness,
+learning-from-results, a Context Assembly Engine, and knowledge governance
+— explicitly forbidding a second memory system, a second agent runtime, a
+second tool registry, or rebuilding what works. The mandatory audit found:
+`OrgMemory` (Phase 7) is a narrow six-kind, upsert-only store for cross-turn
+goals/preferences with no fact/inference distinction and no conflict
+detection; `MissionLearning` (Phase 10) already has the Observation/
+Hypothesis/Learning/Decision distinction but is mission-scoped with no
+cross-mission read; `packages/ai`'s `EmbedOptions`/`AIProvider.embed?` and
+an `'embedding'` model role existed fully typed with **zero concrete
+implementation and zero call sites**; pgvector was never enabled anywhere;
+`research/{fetch,search,extract,tools}.ts` (Phase 5) is a stateless,
+read-only tool pair with **no configured web-search provider**
+(`searchProviderFromEnv()` always returns `null`, a deliberate prior
+disclosure) and no persistence; no knowledge/document model or upload route
+existed anywhere (object storage remains unimplemented); the Tool Registry/
+Policy Engine (Phase 5) and its per-domain closed-tool-file pattern was the
+obvious, already-audited template to extend rather than replace.
+
+**Decision.**
+
+1. **A new typed `KnowledgeItem` layer sits above, not instead of,**
+   `OrgMemory` and `MissionLearning` — both are untouched. `KnowledgeItem`
+   (35 types, `USER`/`ORGANIZATION`/`MISSION` scope, 7-value
+   `KnowledgeClassification`, 9-value `KnowledgeStatus`, confidence,
+   importance, a per-type freshness policy) is the broader business-context/
+   research/document store the brief actually wants; a conversation-derived
+   candidate always lands in `MemoryCandidate` first (governance gate) and
+   only becomes a `KnowledgeItem` on explicit accept or a narrowly-defined
+   auto-accept (`USER_PROVIDED`, LOW/MEDIUM importance, ≥0.75 confidence —
+   HIGH/CRITICAL always waits for a human, regardless of confidence).
+2. **`KnowledgeClassification` reuses the existing `EvidenceItem.kind`
+   grounding vocabulary** (`evidenceKindFor`) instead of inventing a second
+   fact-tagging system — FACT/USER_PROVIDED/SYSTEM_OBSERVED/EXTERNAL_SOURCE
+   → `'fact'`, INFERENCE → `'calculated_metric'`, HYPOTHESIS/OPINION →
+   `'assumption'` — so knowledge folded into the orchestrator's evidence
+   catalogue is graded by the same `checkGroundingFields` machinery that
+   already refuses ungrounded claims, directly operationalizing the master
+   instruction's hard rule 1 inside the new knowledge layer.
+3. **Embeddings are real, but OpenAI-only, and hybrid retrieval never
+   depends on them.** `VercelAIProvider` gained an optional `embed()`
+   (only wired into the OpenAI factory, via `embedMany`); every existing
+   generic seam (`resilient.ts`, `fallback.ts`, `registry.getForRole`)
+   picked it up with zero other changes. `knowledge_embeddings.embedding`
+   is a Prisma `Unsupported("vector(1536)")` column (raw SQL only,
+   `CREATE EXTENSION IF NOT EXISTS vector` in the migration); every
+   vector-touching function catches its own failure and returns
+   `null`/`[]`. `retrieveKnowledge`'s score is
+   `keyword·0.30 + vector·0.30 + importance·0.15 + confidence·0.15 + recency·0.10`
+   — with no provider configured, vector contributes 0 and ranking
+   degrades to keyword + metadata only, never solely to vector similarity
+   in either direction.
+4. **Research is honestly URL-driven, not search-driven, today.**
+   `ResearchProject`/`ResearchQuery`/`ResearchFinding`/`ResearchCitation`
+   implement the full 10-state lifecycle, but since no web-search provider
+   is configured in this deployment, `SEARCHING` never finds anything on
+   its own — `research/engine.ts` fails a project honestly
+   (`FAILED`, a plain-English reason) rather than fabricate a result when
+   given no seed URLs. `research.project.create` is namespaced separately
+   from the pre-existing `research.fetch`/`research.search` tools (Phase
+   5) rather than reusing or colliding with those names. "Runs
+   asynchronously" (the brief's own requirement) is implemented the same
+   way every other background flow in this codebase already is — this app
+   has **no web→worker job producer at all** (`apps/web` has no `bullmq`
+   dependency) — so a new `research-dispatch-sweep` repeatable tick on the
+   existing `agent-run` queue discovers `REQUESTED` projects and executes
+   them in-process, mirroring `missions/loop.ts::runMissionSweep`'s exact
+   shape, rather than inventing a producer path nothing else in this app
+   has.
+5. **The Context Assembly Engine composes, it does not replace.**
+   `agent/context-assembly.ts::assembleAgentContext` calls the existing
+   `loadOrgContext`/`loadMemory` internally and adds `retrieveKnowledge`,
+   recent completed research, and a new cross-mission
+   `missions/learning.ts::listRecentLearnings` read (extending, not
+   duplicating, Phase 10's model) — the orchestrator's gather stage now
+   calls this once instead of its own bare `Promise.all`. Each of the
+   three new reads is independently caught, so a fixture or environment
+   missing the Phase 11 tables degrades to "no extra context" rather than
+   failing the whole turn — the same degrade-gracefully convention every
+   capability already follows. `usedSources` (a new, additive
+   `GrowthAgentResponse` field) is computed from the assembled context,
+   never trusted from the model.
+6. **New tools follow the Phase 5 Tool Registry pattern exactly, with no
+   new authorization model.** `knowledge/tools.ts`
+   (`knowledge.search/get/create/update/archive`, `memory.propose/search`,
+   `evidence.search/get`) and `research/project-tools.ts`
+   (`research.project.create/get/list`) are closed allowlists dispatched
+   through `executeAgentTool`'s existing `kindOf`; `tool-registry.ts`
+   gained their metadata, all LOW risk (none touch an external system). A
+   new `RESEARCH_CALLS` usage meter (added to every plan tier) and six new
+   RBAC permissions (`knowledge.view/manage`, `memory.view/manage`,
+   `research.view/run`) follow the existing catalog/meter conventions with
+   no new mechanism.
+
+**Alternatives considered.**
+
+- *A second, richer memory model replacing `OrgMemory`.* Rejected —
+  `OrgMemory` already correctly serves cross-turn goals/preferences at low
+  stakes; replacing it would touch ~15 call sites for no behavioral gain,
+  against the brief's own "do not rebuild what works."
+- *Reusing `research.fetch`/`research.search`'s tool names for the new
+  project-based tools.* Rejected — they are a different shape (stateless
+  primitive vs. a persisted, polled lifecycle); reusing the names would
+  either collide or blur two genuinely different tool contracts.
+- *A real web-search provider integration this phase.* Rejected — no
+  API-key infrastructure exists in this deployment; adding an env var with
+  no real provider behind it is exactly the "planned but not implemented"
+  pattern this project's own audits have repeatedly flagged and reversed.
+- *Binary document upload (PDF/DOCX).* Rejected — no object storage and no
+  parsing dependency exists; adding a new heavy dependency for this one
+  phase violates hard rule 9. Text/URL ingestion covers the real,
+  achievable case.
+
+**Consequences.** Growth Agent can now answer "what do you know about my
+business," "what have we learned," and "what should we research before the
+next mission" from real, classified, sourced, freshness-tracked storage —
+without a second memory/agent/tool system anywhere. The two genuine,
+disclosed limitations are: research is bounded by the caller's own seed
+URLs until a real search provider is configured, and no live Postgres with
+`pgvector` installed was available to verify the raw-SQL vector paths
+beyond their tested graceful-degradation branch.
+
+---
+
 ## ADR-0059 — Growth Missions: cross-platform orchestration reuses the existing agent runtime, approval queue, and Tool Executor in full; autonomy only ever gates unattended dispatch, never authorization; two real bugs caught by this phase's own tests
 
 **Context.** Phase 10 asked for "Growth Missions" — a user-defined goal

@@ -1508,6 +1508,91 @@ experiments,calendar,monitoring}.ts`), module-for-module mirrors of the
   `crawl`/`task`/`recommendation` stubs and real multi-field `orderBy`
   support) only; no mission-specific adversarial red-team pass was run.
   See `docs/GROWTH-MISSIONS.md`, `docs/PHASE-10-REPORT.md`, ADR-0059.
+- **Memory, Research & Knowledge Intelligence** ✅ (operator's "Phase 11"):
+  a new typed knowledge layer **above**, not instead of, `OrgMemory`
+  (Phase 7, cross-turn goals/preferences — untouched) and `MissionLearning`
+  (Phase 10, mission-scoped Observation/Hypothesis/Learning/Decision —
+  untouched, only a new cross-mission read added). Seven new tables:
+  `KnowledgeSource`, `KnowledgeItem` (35 types, `USER`/`ORGANIZATION`/
+  `MISSION` scope, 7-value `KnowledgeClassification`, 9-value
+  `KnowledgeStatus`, confidence/importance, a per-type freshness policy —
+  `VERIFIED` is set by exactly one function, never automatically),
+  `KnowledgeEvidence`, `KnowledgeEmbedding` (a Prisma
+  `Unsupported("vector(1536)")` column, raw-SQL only), `KnowledgeRelation`,
+  `KnowledgeConflict`, `MemoryCandidate` (the governance gate in front of
+  `KnowledgeItem` creation from conversation — auto-accepts only a
+  `USER_PROVIDED`, LOW/MEDIUM-importance, ≥0.75-confidence statement;
+  HIGH/CRITICAL always waits for a human). Four more for research:
+  `ResearchProject`/`ResearchQuery`/`ResearchFinding`/`ResearchCitation`.
+  `KnowledgeClassification` reuses the existing `EvidenceItem.kind`
+  grounding vocabulary (`evidenceKindFor`) instead of a second fact
+  -tagging system, directly operationalizing hard rule 1 inside the new
+  knowledge layer. **Embeddings**: `packages/ai`'s previously-typed
+  -but-unimplemented `embed()` seam now has a real OpenAI implementation
+  (`text-embedding-3-small` via `embedMany`, wired only into the OpenAI
+  provider factory); every existing generic seam
+  (`resilient`/`fallback`/`registry.getForRole('embedding')`) picked it up
+  with zero other changes. `retrieveKnowledge`'s hybrid score
+  (`keyword·0.30 + vector·0.30 + importance·0.15 + confidence·0.15 +
+recency·0.10`) never depends on an embedding provider being configured —
+  it degrades to keyword + metadata ranking, verified by test. **Research**
+  is honestly URL-driven, not search-driven: `research/search.ts` still has
+  no configured provider (Phase 5's own disclosed limitation, unchanged),
+  so `research/engine.ts` fails a project honestly when given no seed URLs
+  rather than fabricate a result; each successful fetch becomes a
+  `KnowledgeSource` + `ResearchFinding` + `ResearchCitation`, with an
+  optional grounded synthesis pass dropped entirely on failure. "Runs
+  asynchronously" is implemented the way every other background flow in
+  this app already is — `apps/web` has no `bullmq` dependency at all — via
+  a new `research-dispatch-sweep` repeatable tick on the existing
+  `agent-run` queue that discovers `REQUESTED` projects and executes them
+  in-process, mirroring `missions/loop.ts::runMissionSweep`'s exact shape.
+  **Context Assembly Engine** (`agent/context-assembly.ts`) composes
+  `loadOrgContext`/`loadMemory` (called internally, unchanged) with
+  `retrieveKnowledge`, recent completed research, and a new cross-mission
+  `listRecentLearnings` read into one `AgentContext`; the orchestrator's
+  gather stage now calls this once, each of the three new reads
+  independently caught so a failure degrades to "no extra context" rather
+  than failing the turn. A new, additive `GrowthAgentResponse.usedSources`
+  field (server-derived, never model-trusted) powers the chat UI's "Used:"
+  disclosure. A zero-cost deterministic detector
+  (`knowledge/extract.ts`, regex-based, no extra model call) runs
+  alongside `rememberFromTurn` to propose real `MemoryCandidate`s from
+  actual chat use. Missions gained knowledge-awareness too
+  (`missions/planner.ts::gatherKnowledgeContext`) — folding stored
+  knowledge/cross-mission learnings into evidence vs. assumptions before a
+  plan is drafted; found and fixed in passing, `planMission` never
+  actually passed a model to the planner before this phase (Phase 10 wired
+  the refinement path but never its only caller). Two new closed tool
+  files follow the Phase 5 Tool Registry pattern exactly:
+  `knowledge/tools.ts` (`knowledge.search/get/create/update/archive`,
+  `memory.propose/search`, `evidence.search/get`) and
+  `research/project-tools.ts` (`research.project.create/get/list`,
+  namespaced separately from the pre-existing `research.fetch`/
+  `research.search` primitives). New `RESEARCH_CALLS` usage meter (every
+  plan tier) and six RBAC permissions (`knowledge.view/manage`,
+  `memory.view/manage`, `research.view/run`), following existing
+  conventions exactly — no new authorization model. New
+  `/app/knowledge` (overview/detail/memories-to-review/conflicts) and
+  `/app/research` (list+create/detail) UI, reusing the Phase 3 design
+  system. Migration `20260929120000_knowledge_intelligence` (11 new
+  tables, one new `UsageMeter` value, `CREATE EXTENSION IF NOT EXISTS
+vector`) — additive, no drops. Two shared-test-harness gaps found and
+  fixed while writing this phase's own tests: `createMemoryDb()` had no
+  `orgMemory` stub (a real, load-bearing model `loadMemory` needs, simply
+  never added); the harness's `matchValue` never handled Prisma's
+  `{contains/equals, mode: 'insensitive'}` string-filter shape at all,
+  silently matching nothing rather than erroring — both are now
+  permanent, reusable fixes for every future phase's tests. Gates green:
+  lint 14/14, typecheck 14/14, **`packages/services` 1348 tests** (+70),
+  tenant-scope clean, web build. **Verification limit, disclosed**: no
+  live OpenAI key, no real Postgres with `pgvector` installed, and no live
+  external web content was available in this sandbox — every new module
+  verified by unit/integration-style tests against hand-built fixtures and
+  the shared in-memory DB harness only; the pgvector-specific raw-SQL
+  paths are exercised only via their graceful-degradation branch, not
+  against a real vector column. See `docs/KNOWLEDGE-INTELLIGENCE.md`,
+  `docs/PHASE-11-REPORT.md`, ADR-0060.
 - **Still outstanding:** Postgres **RLS** (ADR-0035, re-affirmed in
   ADR-0052 — application-layer scoping + the CI tenant-scope lint +
   integration tests, now actually running, remain the accepted mitigation);
@@ -1549,8 +1634,12 @@ experiments,calendar,monitoring}.ts`), module-for-module mirrors of the
   `MAX_RUNTIME`/`TIMED_OUT` (the status value is reserved, nothing sets it
   yet); rolling a turn's full sub-agent AI cost up into its parent
   `AgentRun`'s displayed `costUsd` (billing enforcement is already
-  correct; only the _display_ undercounts); `pgvector` memory + the
-  remaining agents + agent kill switches; SEO object-storage archiving +
+  correct; only the _display_ undercounts); `pgvector` memory (**partially
+  closed by Phase 11/ADR-0060** — a real embedding provider, the vector
+  column, and hybrid retrieval all exist now; unverified against a live
+  Postgres with the extension installed, and not yet used by any agent
+  besides the growth-agent orchestrator/mission planner) + the remaining
+  agents + agent kill switches; SEO object-storage archiving +
   network-isolated egress pool; billing follow-ups (a worker queue for the
   reconcile + counter rollup, Stripe usage-record push for metered overage);
   reporting follow-ups (charts in the PDF, scheduled report packs); automation
@@ -1565,8 +1654,23 @@ experiments,calendar,monitoring}.ts`), module-for-module mirrors of the
   persisted brief/review history (each is computed fresh and delivered via
   `Notification`, never stored as its own queryable row); a wall-clock
   timeout on a single mission loop tick (relies on the underlying tool's
-  own timeout today, same disclosed gap as the Phase 4 turn loop). Do not
-  start any of them without an explicit instruction.
+  own timeout today, same disclosed gap as the Phase 4 turn loop); a real
+  web-search provider for `research.search`/research `SEARCHING` (still no
+  API-key infrastructure exists — Phase 11 made research URL-driven, not
+  search-driven, as a disclosed, honest interim); binary document upload
+  (PDF/DOCX — no object storage, no parsing dependency exists; Phase 11's
+  knowledge ingestion is text/URL only); a knowledge-graph visualization UI
+  (`KnowledgeRelation` rows exist and are readable, no interactive graph
+  view); a dedicated knowledge-consolidation/duplicate-review UI page (the
+  service functions exist and are tested, invoked today only via direct
+  call); CSV/Markdown knowledge export (JSON only); live-streaming research
+  progress in the UI (poll-on-refresh only, no SSE stream the way chat
+  turns have one); a knowledge/research-specific adversarial red-team pass
+  (reuses the existing shared prompt-injection tests unchanged, matching
+  Phase 10's own disclosed gap for missions); `scripts/check-tenant-scope.mjs`
+  still doesn't cover Phase 10's mission models (noticed while extending
+  its allowlist for Phase 11's own models, not fixed — out of scope for
+  either phase). Do not start any of them without an explicit instruction.
 
 ### Running it locally
 
@@ -1611,3 +1715,17 @@ the "Generate AI summary" button. `CRAWLER_HALT=1` (or
 (`renderMode` AUTO/HEADLESS) only runs through the `seo-crawl` worker queue,
 which needs Playwright's Chromium installed (`pnpm --filter @growth-agent/worker
 exec playwright install chromium`).
+
+For **Knowledge & Research** (`/app/knowledge`, `/app/research`): no extra
+config to use either — knowledge search/create/browse and starting research
+against your own seed URLs all work fully deterministically. Set
+`OPENAI_API_KEY` to enable semantic (embedding-based) retrieval on top of
+keyword search; without it, retrieval still works, ranked by keyword +
+recency + importance only. Research has no configured web-search provider
+in this deployment (matching `research.search`'s existing disclosed
+limitation) — give it seed URLs to fetch rather than a bare question if you
+want it to gather anything. `knowledge_embeddings.embedding` needs the
+Postgres `vector` extension (`CREATE EXTENSION vector`, run automatically by
+the migration on a Postgres build that has it available, e.g. Supabase);
+without it, embeddings are simply never stored and retrieval falls back to
+keyword ranking.

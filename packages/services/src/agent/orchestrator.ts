@@ -33,9 +33,14 @@ import {
   getGovernancePolicy,
 } from '../governance/index.js';
 import type { IntegrationKey } from '../integrations/contract.js';
-import { loadOrgContext, summarizeOrgContext, type OrgContext } from './context.js';
+import { summarizeOrgContext, type OrgContext } from './context.js';
+import { assembleAgentContext, type AgentContext } from './context-assembly.js';
 import { createConversation, touchConversation } from './conversations.js';
-import { loadMemory, rememberFromTurn, summarizeMemory } from './memory.js';
+import { rememberFromTurn, summarizeMemory } from './memory.js';
+import { extractCandidatesDeterministic } from '../knowledge/extract.js';
+import { proposeMemoryCandidate } from '../knowledge/candidates.js';
+import { evidenceKindFor } from '../knowledge/schemas.js';
+import type { EmbeddingCapableModel } from '../knowledge/embeddings.js';
 import { planTurn } from './planner.js';
 import {
   type CapabilityId,
@@ -65,6 +70,15 @@ export interface GrowthAgentDeps {
   model?: AgentModel & Partial<SynthModel>;
   /** Used for streaming the final natural-language reply. */
   responseModel?: ResponseModel;
+  /**
+   * Phase 11: used by the Context Assembly Engine's hybrid retrieval for
+   * semantic search over stored knowledge. Separate from `model` because
+   * `AgentModel`'s type only guarantees `generateObject` — this is only
+   * ever populated with a real, embed-capable `AIProvider` (see
+   * `growthAgentDepsFromEnv`), and retrieval degrades to keyword-only
+   * ranking whenever it's absent.
+   */
+  embeddingModel?: EmbeddingCapableModel;
   /** Override the capability registry (tests / a restricted set). */
   capabilities?: Map<string, Capability>;
 }
@@ -251,13 +265,21 @@ export async function* streamGrowthAgentTurn(
   yield { type: 'run_created', agentRunId: run.id, conversationId: conversation.id };
 
   try {
-    // 2. context + memory
-    yield { type: 'status', stage: 'gathering', detail: 'Reading your connected data and goals' };
-    const [orgContext, memory] = await Promise.all([
-      loadOrgContext(opts.organizationId, db),
-      loadMemory(opts.organizationId, opts.userId, db),
-    ]);
-    const goals = [...memory.userGoals, ...memory.orgGoals];
+    // 2. context + memory + stored knowledge/research/learning (Phase 11's
+    // Context Assembly Engine — a single composed read instead of each
+    // capability building its own ad hoc mash-up).
+    yield {
+      type: 'status',
+      stage: 'gathering',
+      detail: 'Reading your connected data, goals and stored knowledge',
+    };
+    const agentContext = await assembleAgentContext(
+      { organizationId: opts.organizationId, userId: opts.userId, goal: message, model: deps.embeddingModel },
+      db,
+    );
+    const orgContext = agentContext.currentData;
+    const memory = agentContext.relevantMemory;
+    const goals = agentContext.goals;
     await recordAgentRunEvent(
       { agentRunId: run.id, organizationId: opts.organizationId, type: 'CONTEXT_LOADED' },
       db,
@@ -410,6 +432,7 @@ export async function* streamGrowthAgentTurn(
       memorySummary: summarizeMemory(memory),
       plan,
       capabilityResults,
+      agentContext,
       signal: opts.signal,
     });
 
@@ -501,6 +524,22 @@ export async function* streamGrowthAgentTurn(
         conversationId: conversation.id,
       },
     );
+    // Phase 11, Part 20: a zero-cost, deterministic floor for capturing
+    // durable business context from chat — separate from (and does not
+    // replace) `rememberFromTurn`'s own OrgMemory goal/preference
+    // extraction. Every candidate still goes through governance
+    // (`proposeMemoryCandidate`) before it's real knowledge.
+    for (const candidate of extractCandidatesDeterministic(message)) {
+      await proposeMemoryCandidate(
+        {
+          organizationId: opts.organizationId,
+          userId: opts.userId,
+          conversationId: conversation.id,
+          ...candidate,
+        },
+        db,
+      ).catch(() => undefined);
+    }
     await recordAudit(
       {
         organizationId: opts.organizationId,
@@ -580,6 +619,7 @@ interface SynthInput {
   memorySummary: string;
   plan: TurnPlan;
   capabilityResults: CapabilityResult[];
+  agentContext: AgentContext;
   signal?: AbortSignal;
 }
 
@@ -592,7 +632,10 @@ async function synthesize(
   usedModel: boolean;
   usage: Awaited<ReturnType<SynthModel['generateObject']>>['usage'] | null;
 }> {
-  // Build the evidence catalogue (ids the model must cite).
+  // Build the evidence catalogue (ids the model must cite). Phase 11 folds
+  // stored knowledge and prior research/learnings into the SAME catalogue
+  // and grounding machinery every capability's evidence already uses — a
+  // hypothesis is tagged 'assumption', never 'fact' (`evidenceKindFor`).
   const evidence: Array<{ id: string; source: string; statement: string; kind: string }> = [];
   input.capabilityResults.forEach((cr) => {
     cr.evidence.forEach((e) => {
@@ -604,13 +647,38 @@ async function synthesize(
       });
     });
   });
+  input.agentContext.relevantKnowledge.forEach((k) => {
+    evidence.push({
+      id: `e${evidence.length + 1}`,
+      source: 'knowledge',
+      statement: `${k.title}: ${k.summary ?? k.content.slice(0, 300)}`,
+      kind: evidenceKindFor(k.classification as never),
+    });
+  });
+  input.agentContext.recentResearch.forEach((r) => {
+    if (!r.conclusion) return;
+    evidence.push({
+      id: `e${evidence.length + 1}`,
+      source: 'research',
+      statement: `${r.question}: ${r.conclusion}`,
+      kind: 'assumption',
+    });
+  });
+  input.agentContext.historicalLearning.forEach((l) => {
+    evidence.push({
+      id: `e${evidence.length + 1}`,
+      source: 'mission-learning',
+      statement: `${l.title}: ${l.detail.slice(0, 300)}`,
+      kind: l.type === 'OBSERVATION' || l.type === 'DECISION' ? 'fact' : 'assumption',
+    });
+  });
   const knownIds = new Set(evidence.map((e) => e.id));
   const factNumbers = evidence
     .flatMap((e) => e.statement.match(/-?\d[\d,]*(?:\.\d+)?/g) ?? [])
     .map((s) => Number(s.replace(/,/g, '')))
     .filter((n) => Number.isFinite(n));
 
-  const deterministic = finalizeBlocks(assembleResponse(input, evidence));
+  const deterministic = finalizeBlocks(assembleResponse(input, evidence), input.agentContext.usedSources);
 
   const canModel = typeof deps.model?.generateObject === 'function' && evidence.length > 0;
   if (!canModel) return { blocks: deterministic, grounded: true, usedModel: false, usage: null };
@@ -650,7 +718,12 @@ Produce the structured answer for the user message above. Cite evidenceRefs for 
     const candidate = res.object;
     const issues = checkGroundingFields(flatten(candidate), knownIds, factNumbers);
     if (issues.length === 0) {
-      return { blocks: finalizeBlocks(candidate), grounded: true, usedModel: true, usage };
+      return {
+        blocks: finalizeBlocks(candidate, input.agentContext.usedSources),
+        grounded: true,
+        usedModel: true,
+        usage,
+      };
     }
     log.warn({ attempt, issues }, 'growth agent synthesis failed grounding; retrying');
     prompt = `${prompt}\n\nYOUR PREVIOUS ANSWER WAS REJECTED. Fix these and resubmit:\n${issues
@@ -673,13 +746,17 @@ Produce the structured answer for the user message above. Cite evidenceRefs for 
  * response is ever persisted or shown, on both the model path and the
  * deterministic fallback.
  */
-function finalizeBlocks(blocks: GrowthAgentResponseT): GrowthAgentResponseT {
+function finalizeBlocks(blocks: GrowthAgentResponseT, usedSources: string[] = []): GrowthAgentResponseT {
   const scrubbed = scrubModelOutput(blocks);
   return {
     ...scrubbed,
     proposedActions: scrubbed.proposedActions.map((a) =>
       a.kind === 'external' ? { ...a, requiresConfirmation: true } : a,
     ),
+    // Server-derived, never the model's own claim (Part 44) — what was
+    // actually retrieved for this turn, independent of what the model says
+    // it used.
+    usedSources,
   };
 }
 

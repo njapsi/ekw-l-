@@ -83,6 +83,11 @@ export const GrowthAgentResponse = z.object({
   recommendations: z.array(AgentRecommendation).default([]),
   proposedActions: z.array(ProposedAction).default([]),
   disclaimers: z.array(z.string()).default([]),
+  /** Phase 11, Part 44: human-readable labels of what stored knowledge/
+   * memory/research fed this answer ("Your business profile", "Previous
+   * YouTube experiments", …) — never the raw prompt or retrieved content
+   * itself, just enough for the chat UI's "Used:" disclosure. */
+  usedSources: z.array(z.string()).default([]),
 });
 export type GrowthAgentResponse = z.infer<typeof GrowthAgentResponse>;
 

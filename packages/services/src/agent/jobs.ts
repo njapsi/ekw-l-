@@ -31,15 +31,30 @@ export function growthAgentDepsFromEnv(opts: GrowthAgentDepsFromEnvOptions = {})
     ? [createAiUsageSink({ organizationId: opts.organizationId, actorId: opts.actorId, db })]
     : [];
   const registry = createRegistryFromEnv(sinks);
+  const deps: GrowthAgentDeps = { db };
   try {
     // `analyst` role for planning + capability agents + grounded synthesis;
     // resilience (timeout / retry / provider fallback / kill switch) is baked in
     // by `createRegistryFromEnv`.
     const { provider } = registry.getForRole('analyst');
-    return { db, model: provider, responseModel: provider };
+    deps.model = provider;
+    deps.responseModel = provider;
   } catch {
-    return { db }; // deterministic-only
+    // deterministic-only for text generation; embedding resolution below is
+    // independent and still attempted.
   }
+  try {
+    // Phase 11: `modelForRole('embedding')` defaults to OpenAI's
+    // `text-embedding-3-small` (packages/ai/src/roles.ts) — resolves to a
+    // real `embed()` whenever `OPENAI_API_KEY` is configured, regardless of
+    // which provider `AI_DEFAULT_PROVIDER` otherwise points at.
+    const { provider } = registry.getForRole('embedding');
+    if (typeof provider.embed === 'function') deps.embeddingModel = provider;
+  } catch {
+    // no embedding-capable provider configured — knowledge retrieval falls
+    // back to keyword/metadata ranking only.
+  }
+  return deps;
 }
 
 export async function runGrowthAgentTurnJob(

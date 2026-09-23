@@ -1,8 +1,10 @@
 import {
+  embedMany as aiEmbedMany,
   generateObject as aiGenerateObject,
   generateText as aiGenerateText,
   streamText as aiStreamText,
   tool as aiTool,
+  type EmbeddingModel,
   type LanguageModel,
   type ToolSet,
 } from 'ai';
@@ -10,6 +12,8 @@ import type { z } from 'zod';
 import { makeUsageRecord } from '../pricing.js';
 import type {
   AIProvider,
+  EmbedOptions,
+  EmbedResult,
   GenerateObjectOptions,
   GenerateObjectResult,
   GenerateTextOptions,
@@ -19,6 +23,15 @@ import type {
   ToolCallRecord,
   ToolDefinition,
 } from '../types.js';
+
+/** Only a provider whose factory passes this (currently OpenAI) exposes `embed()` —
+ * `AIProvider.embed` stays `undefined` for the others, exactly as before this was
+ * added, so every existing `typeof provider.embed === 'function'` check
+ * (`resilient.ts`, `fallback.ts`) keeps degrading the same way it always has. */
+export interface EmbeddingSupport {
+  resolve: (modelId: string) => EmbeddingModel<string>;
+  defaultModelId: string;
+}
 
 /**
  * Maps our provider-agnostic `ToolDefinition[]` to the Vercel AI SDK's
@@ -64,11 +77,30 @@ function collectToolCalls(
  * Concrete providers (Anthropic/OpenAI/Google) are thin factories over this.
  */
 export class VercelAIProvider implements AIProvider {
+  readonly embed?: (opts: EmbedOptions) => Promise<EmbedResult>;
+
   constructor(
     public readonly name: ProviderName,
     private readonly resolveModel: (modelId: string) => LanguageModel,
     private readonly defaultModelId: string,
-  ) {}
+    embedding?: EmbeddingSupport,
+  ) {
+    if (embedding) {
+      this.embed = async (opts: EmbedOptions): Promise<EmbedResult> => {
+        const modelId = opts.model?.model ?? embedding.defaultModelId;
+        const model = embedding.resolve(modelId);
+        const { embeddings, usage } = await aiEmbedMany({
+          model,
+          values: opts.values,
+          abortSignal: opts.signal,
+        });
+        return {
+          embeddings,
+          usage: makeUsageRecord(this.name, modelId, usage.tokens, 0),
+        };
+      };
+    }
+  }
 
   private model(id?: string): { model: LanguageModel; id: string } {
     const modelId = id ?? this.defaultModelId;

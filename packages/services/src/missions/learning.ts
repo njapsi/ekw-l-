@@ -61,3 +61,28 @@ export async function listMissionLearnings(
     take: 100,
   });
 }
+
+/**
+ * Phase 11 (§27, §85): cross-mission learnings for an organization, not
+ * tied to one mission's own review page — this is what
+ * `agent/context-assembly.ts` and a fresh mission's planner read so
+ * "retrieve previous experiments / successful topics / failed topics" works
+ * across a whole organization's mission history, not just the one currently
+ * open. Reuses the same `MissionLearning` table; no new model.
+ */
+export async function listRecentLearnings(
+  organizationId: string,
+  opts: { limit?: number; type?: MissionLearningType; excludeMissionId?: string } = {},
+  db: Db = prisma,
+) {
+  return db.missionLearning.findMany({
+    where: {
+      organizationId,
+      ...(opts.type ? { type: opts.type } : {}),
+      ...(opts.excludeMissionId ? { missionId: { not: opts.excludeMissionId } } : {}),
+    },
+    orderBy: { createdAt: 'desc' },
+    take: Math.min(opts.limit ?? 20, 100),
+    include: { mission: { select: { name: true } } },
+  });
+}

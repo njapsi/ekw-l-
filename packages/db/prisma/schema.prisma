@@ -225,6 +225,17 @@ model Organization {
   missionMetrics            MissionMetric[]
   missionLearnings          MissionLearning[]
   missionEvents             MissionEvent[]
+  knowledgeSources          KnowledgeSource[]
+  knowledgeItems            KnowledgeItem[]
+  knowledgeEvidence         KnowledgeEvidence[]
+  knowledgeEmbeddings       KnowledgeEmbedding[]
+  knowledgeRelations        KnowledgeRelation[]
+  knowledgeConflicts        KnowledgeConflict[]
+  memoryCandidates          MemoryCandidate[]
+  researchProjects          ResearchProject[]
+  researchQueries           ResearchQuery[]
+  researchFindings          ResearchFinding[]
+  researchCitations         ResearchCitation[]
 
   // Set when an OWNER requested deletion; the org is hidden immediately and a
   // grace-period purge job hard-deletes it (cascading every tenant row) after
@@ -1912,6 +1923,11 @@ enum UsageMeter {
   /// Phase 5 — every native, research, or MCP tool call the agent runtime
   /// dispatches through the tool executor (agent/tool-executor.ts).
   TOOL_CALLS
+  /// Phase 11 — external web-research operations (`research.fetch`/
+  /// `research.search` invocations made on behalf of a `ResearchProject`).
+  /// Tracked separately from `TOOL_CALLS` so research spend can be budgeted
+  /// on its own, per Part 67's "research budgets" requirement.
+  RESEARCH_CALLS
 }
 
 /// Where an `Entitlement` row came from. `PLAN` rows are derived from the
@@ -3150,4 +3166,502 @@ model MissionEvent {
 
   @@index([missionId, createdAt])
   @@map("mission_events")
+}
+
+// --- Phase 11: Memory, Research & Knowledge Intelligence ------------------
+//
+// `OrgMemory` (Phase 7) stays exactly what it is — free-prose, cross-turn
+// goals/preferences extracted from conversation, closed to six `MemoryKind`
+// values. `MissionLearning` (Phase 10) stays exactly what it is — a
+// mission-scoped Observation/Hypothesis/Learning/Decision record. Neither is
+// duplicated here. `KnowledgeItem` is the new, broader typed store the brief
+// asks for (35 knowledge types, org/user/mission-scoped business context,
+// research conclusions, documents) — the layer above both: a mission's
+// planner and the growth-agent orchestrator now read `OrgMemory` +
+// `MissionLearning` + `KnowledgeItem` together (`agent/context-assembly.ts`),
+// but each model keeps its own, non-overlapping job. The brief's own model
+// list (Part 44) is realized as:
+//   KnowledgeItem, KnowledgeSource, KnowledgeEvidence, KnowledgeRelation,
+//   KnowledgeEmbedding, KnowledgeConflict — new tables, as named.
+//   ResearchProject, ResearchQuery ("queries"), ResearchFinding,
+//   ResearchCitation — new tables, as named ("ResearchSource" folds into the
+//   existing `KnowledgeSource`, shared with knowledge items — a citation and
+//   a knowledge item's source are the same concept and would otherwise be
+//   duplicated).
+//   MemoryCandidate — new table, the governance gate in front of
+//   `KnowledgeItem` creation from conversation (Part 20-22); `OrgMemory`'s own
+//   extraction path (goals/preferences) is untouched and still writes
+//   directly, since that model was already designed for exactly that.
+
+/// Part 3. AI-generated knowledge must never be presented as fact until
+/// evidence justifies it (Part 5) — this is the classification that decision
+/// is based on, independent of `KnowledgeStatus`.
+enum KnowledgeClassification {
+  FACT
+  INFERENCE
+  HYPOTHESIS
+  OPINION
+  USER_PROVIDED
+  SYSTEM_OBSERVED
+  EXTERNAL_SOURCE
+}
+
+/// Part 4. `DRAFT`/`UNVERIFIED` are the default landing state for anything
+/// not directly user-provided; nothing here is set to `VERIFIED` except by an
+/// explicit verification action (`knowledge/items.ts::verifyKnowledgeItem`) —
+/// never automatically by the extractor or the research engine.
+enum KnowledgeStatus {
+  DRAFT
+  ACTIVE
+  VERIFIED
+  UNVERIFIED
+  STALE
+  CONFLICTED
+  ARCHIVED
+  EXPIRED
+  REJECTED
+}
+
+/// Part 18's retrieval scopes, minus `TEAM`/`PROJECT`/`INTEGRATION`/
+/// `CONVERSATION`/`GLOBAL_PUBLIC` — this deployment has no team-vs-org
+/// distinction, project entity, per-integration knowledge partition, or
+/// seeded public knowledge base to scope against (Part 88 warns against
+/// building unused scope machinery); `MISSION` and `USER` are real and
+/// enforced, `ORGANIZATION` is the default and covers everything else. A
+/// conversation-scoped read already exists — it's `OrgMemory`, not this model.
+enum KnowledgeScope {
+  USER
+  ORGANIZATION
+  MISSION
+}
+
+/// LOW/MEDIUM/HIGH/CRITICAL, matching `ToolRiskLevel`'s naming so the two
+/// four-level scales in this codebase read the same way.
+enum KnowledgeImportance {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+/// Part 3's 35 knowledge types, verbatim.
+enum KnowledgeType {
+  BUSINESS_PROFILE
+  BRAND_PROFILE
+  AUDIENCE_PROFILE
+  PRODUCT
+  SERVICE
+  OFFER
+  WEBSITE
+  SEO
+  CONTENT
+  YOUTUBE
+  TIKTOK
+  WORDPRESS
+  COMPETITOR
+  MARKET
+  KEYWORD
+  TOPIC
+  CAMPAIGN
+  MISSION
+  EXPERIMENT
+  PERFORMANCE
+  CUSTOMER_INSIGHT
+  GROWTH_INSIGHT
+  USER_PREFERENCE
+  ORGANIZATION_PREFERENCE
+  STRATEGY
+  DECISION
+  ASSUMPTION
+  CONSTRAINT
+  GOAL
+  RESOURCE
+  PROCESS
+  DOCUMENT
+  RESEARCH
+  EXTERNAL_FACT
+  INTERNAL_FACT
+  LEARNING
+}
+
+/// Part 6.
+enum KnowledgeSourceType {
+  YOUTUBE
+  TIKTOK
+  GOOGLE_SEARCH_CONSOLE
+  WEBSITE_CRAWL
+  WORDPRESS
+  USER_INPUT
+  UPLOADED_DOCUMENT
+  INTERNAL_ANALYTICS
+  MISSION_RESULT
+  EXPERIMENT_RESULT
+  AI_GENERATED
+  WEB_RESEARCH
+}
+
+/// Part 6. Assigned by transparent rule (`knowledge/sources.ts::trustLevelFor`)
+/// from the source type alone — never an arbitrary "AI score" (the brief's
+/// own explicit instruction).
+enum SourceTrustLevel {
+  VERY_HIGH
+  HIGH
+  MEDIUM
+  LOW
+  UNKNOWN
+}
+
+/// Part 24. A relational model, not a graph database (Part 24 explicitly
+/// allows this).
+enum KnowledgeRelationType {
+  RELATES_TO
+  SUPPORTS
+  CONTRADICTS
+  DERIVED_FROM
+  TARGETS
+  PUBLISHED_ON
+  GENERATED_BY
+  RESULTED_IN
+  INFLUENCES
+  DEPENDS_ON
+}
+
+enum KnowledgeConflictStatus {
+  OPEN
+  RESOLVED
+  DISMISSED
+}
+
+/// Part 20's governance gate: a conversation-derived candidate sits here
+/// until it is reviewed (or auto-accepted, for a low-importance, high
+/// -confidence, non-sensitive candidate — `knowledge/candidates.ts`) rather
+/// than becoming a `KnowledgeItem` immediately.
+enum MemoryCandidateStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  AUTO_ACCEPTED
+  /// A newer candidate for the same organization/type/topic replaced this
+  /// one before it was ever reviewed.
+  SUPERSEDED
+}
+
+/// Part 8's 9 lifecycle states, plus `PARTIALLY_COMPLETED` (Part 69: "Never
+/// fabricate a successful research result... mark it PARTIALLY_COMPLETED").
+enum ResearchStatus {
+  REQUESTED
+  PLANNING
+  SEARCHING
+  COLLECTING
+  ANALYZING
+  VERIFYING
+  COMPLETED
+  PARTIALLY_COMPLETED
+  FAILED
+  CANCELLED
+}
+
+/// Part 6-7. Shared by `KnowledgeEvidence` and `ResearchCitation` — a
+/// citation IS a source, so the brief's separately-named "ResearchSource"
+/// folds into this one table rather than duplicating it (see the Phase 11
+/// header comment above).
+model KnowledgeSource {
+  id             String              @id @default(cuid())
+  organizationId String
+  type           KnowledgeSourceType
+  url            String?
+  title          String?
+  publisher      String?
+  author         String?
+  publishedAt    DateTime?
+  retrievedAt    DateTime            @default(now())
+  lastVerifiedAt DateTime?
+  /// SHA-256 of the retrieved content, for dedupe (Part 83's idempotency
+  /// requirement — refetching the same URL never creates a second source).
+  contentHash    String?
+  trustLevel     SourceTrustLevel    @default(UNKNOWN)
+  metadata       Json?
+  createdAt      DateTime            @default(now())
+
+  organization Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  evidence     KnowledgeEvidence[]
+  citations    ResearchCitation[]
+  findings     ResearchFinding[]
+  primaryFor   KnowledgeItem[]     @relation("KnowledgePrimarySource")
+
+  @@index([organizationId, type])
+  @@index([organizationId, contentHash])
+  @@map("knowledge_sources")
+}
+
+/// Part 3-5. The typed knowledge model. `scope` + `missionId` implement Part
+/// 18's retrieval scoping; `classification` implements Part 5's fact/
+/// inference/hypothesis/opinion distinction; `status` implements Part 4's
+/// lifecycle; `expiresAt`/`lastVerifiedAt`/`lastUsedAt` implement Part 23's
+/// freshness model.
+model KnowledgeItem {
+  id               String                  @id @default(cuid())
+  organizationId   String
+  createdById      String?
+  /// Set only for `scope: MISSION` — the mission this knowledge item belongs
+  /// to (an experiment result, a mission-specific assumption, …).
+  missionId        String?
+  type             KnowledgeType
+  scope            KnowledgeScope          @default(ORGANIZATION)
+  title            String
+  content          String                  @db.Text
+  summary          String?
+  classification   KnowledgeClassification @default(SYSTEM_OBSERVED)
+  confidence       Float                   @default(0.5)
+  importance       KnowledgeImportance     @default(MEDIUM)
+  status           KnowledgeStatus         @default(DRAFT)
+  primarySourceId  String?
+  /// A freshness policy key (e.g. "long_lived", "short", "permanent") resolved
+  /// by `knowledge/freshness.ts` — drives how `expiresAt` is (re)computed, so
+  /// the policy travels with the row rather than being re-derived from `type`
+  /// every time (Part 36: "make freshness configurable").
+  freshnessPolicy  String                  @default("medium")
+  expiresAt        DateTime?
+  lastVerifiedAt   DateTime?
+  lastUsedAt       DateTime?
+  metadata         Json?
+  createdAt        DateTime                @default(now())
+  updatedAt        DateTime                @updatedAt
+
+  organization  Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  primarySource KnowledgeSource?      @relation("KnowledgePrimarySource", fields: [primarySourceId], references: [id], onDelete: SetNull)
+  evidence      KnowledgeEvidence[]
+  embeddings    KnowledgeEmbedding[]
+  relationsFrom KnowledgeRelation[]   @relation("KnowledgeRelationFrom")
+  relationsTo   KnowledgeRelation[]   @relation("KnowledgeRelationTo")
+  conflictsAsA  KnowledgeConflict[]   @relation("KnowledgeConflictA")
+  conflictsAsB  KnowledgeConflict[]   @relation("KnowledgeConflictB")
+  candidateOf   MemoryCandidate[]
+
+  @@index([organizationId, type, status])
+  @@index([organizationId, status, expiresAt])
+  @@index([organizationId, scope, missionId])
+  @@index([organizationId, updatedAt])
+  @@map("knowledge_items")
+}
+
+/// Part 7. Links one claim to the source that backs it.
+model KnowledgeEvidence {
+  id             String   @id @default(cuid())
+  organizationId String
+  knowledgeId    String
+  sourceId       String
+  claim          String   @db.Text
+  evidence       String   @db.Text
+  location       String?
+  retrievedAt    DateTime @default(now())
+  confidence     Float    @default(0.5)
+  createdAt      DateTime @default(now())
+
+  organization Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  knowledge    KnowledgeItem   @relation(fields: [knowledgeId], references: [id], onDelete: Cascade)
+  source       KnowledgeSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  @@index([knowledgeId])
+  @@map("knowledge_evidence")
+}
+
+/// Part 16. One row per chunk (Part 15's chunking — a document becomes many
+/// rows sharing `knowledgeId`; a short knowledge item is a single `chunkIndex
+/// 0` row). `embedding` is `Unsupported` because Prisma Client has no native
+/// vector type — every read/write goes through raw SQL
+/// (`knowledge/embeddings.ts`), guarded so a deployment with no embedding
+/// provider configured simply never populates it (`embedding` stays null and
+/// retrieval falls back to keyword/metadata ranking only, per Part 17: "Do
+/// not rank solely by vector similarity"). Requires `CREATE EXTENSION vector`
+/// (see the migration) — supported by Supabase/most managed Postgres, not
+/// verified against a live database in this environment (disclosed in
+/// docs/KNOWLEDGE-INTELLIGENCE.md).
+model KnowledgeEmbedding {
+  id               String                       @id @default(cuid())
+  organizationId   String
+  knowledgeId      String
+  chunkIndex       Int                          @default(0)
+  chunkText        String                       @db.Text
+  /// Where in the source document this chunk came from (Part 15: "preserve
+  /// document identity/page/section/heading/paragraph"), e.g.
+  /// `{ "heading": "Pricing", "paragraphIndex": 3 }`.
+  chunkMetadata    Json?
+  embedding        Unsupported("vector(1536)")?
+  embeddingModel   String?
+  embeddingVersion String?
+  createdAt        DateTime                     @default(now())
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  knowledge    KnowledgeItem @relation(fields: [knowledgeId], references: [id], onDelete: Cascade)
+
+  @@unique([knowledgeId, chunkIndex])
+  @@index([organizationId])
+  @@map("knowledge_embeddings")
+}
+
+/// Part 24.
+model KnowledgeRelation {
+  id             String                @id @default(cuid())
+  organizationId String
+  fromId         String
+  toId           String
+  type           KnowledgeRelationType
+  createdAt      DateTime              @default(now())
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  from         KnowledgeItem @relation("KnowledgeRelationFrom", fields: [fromId], references: [id], onDelete: Cascade)
+  to           KnowledgeItem @relation("KnowledgeRelationTo", fields: [toId], references: [id], onDelete: Cascade)
+
+  @@unique([fromId, toId, type])
+  @@index([organizationId])
+  @@map("knowledge_relations")
+}
+
+/// Part 37. Two knowledge items that disagree — surfaced, never silently
+/// resolved by picking one (the brief's explicit instruction).
+model KnowledgeConflict {
+  id             String                  @id @default(cuid())
+  organizationId String
+  topic          String
+  knowledgeAId   String
+  knowledgeBId   String
+  detectedAt     DateTime                @default(now())
+  status         KnowledgeConflictStatus @default(OPEN)
+  resolution     String?                 @db.Text
+  resolvedById   String?
+  resolvedAt     DateTime?
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  knowledgeA   KnowledgeItem @relation("KnowledgeConflictA", fields: [knowledgeAId], references: [id], onDelete: Cascade)
+  knowledgeB   KnowledgeItem @relation("KnowledgeConflictB", fields: [knowledgeBId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, status])
+  @@map("knowledge_conflicts")
+}
+
+/// Part 20-22. A candidate extracted from a conversation, awaiting review
+/// before it becomes a `KnowledgeItem` — "Do not automatically save every
+/// statement." `resolvedKnowledgeId` is set once accepted.
+model MemoryCandidate {
+  id                  String                  @id @default(cuid())
+  organizationId      String
+  userId              String?
+  conversationId      String?
+  content             String                  @db.Text
+  proposedType        KnowledgeType
+  classification      KnowledgeClassification @default(USER_PROVIDED)
+  scope               KnowledgeScope          @default(ORGANIZATION)
+  importance          KnowledgeImportance     @default(MEDIUM)
+  confidence          Float                   @default(0.6)
+  reason              String                  @db.Text
+  status              MemoryCandidateStatus   @default(PENDING)
+  resolvedKnowledgeId String?
+  resolvedById        String?
+  resolvedAt          DateTime?
+  createdAt           DateTime                @default(now())
+
+  organization      Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  resolvedKnowledge KnowledgeItem? @relation(fields: [resolvedKnowledgeId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, status])
+  @@map("memory_candidates")
+}
+
+/// Part 8-9. The research lifecycle. `conclusion`/`confidence` are set only
+/// on `COMPLETED`/`PARTIALLY_COMPLETED` — never fabricated for a `FAILED` run.
+model ResearchProject {
+  id             String         @id @default(cuid())
+  organizationId String
+  createdById    String
+  /// Set when this research was requested in service of a mission (Part 45).
+  missionId      String?
+  question       String         @db.Text
+  objective      String?        @db.Text
+  scope          String?        @db.Text
+  status         ResearchStatus @default(REQUESTED)
+  /// `{ allowedSourceTypes?, maxSources, seedUrls? }` — the caller's own
+  /// bounds (Part 67's "never allow unlimited research"), enforced by
+  /// `research/engine.ts`, not merely advisory.
+  config         Json?
+  conclusion     String?        @db.Text
+  confidence     Float?
+  failureReason  String?
+  startedAt      DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  organization Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  queries      ResearchQuery[]
+  findings     ResearchFinding[]
+  citations    ResearchCitation[]
+
+  @@index([organizationId, status])
+  @@index([organizationId, createdAt])
+  @@map("research_projects")
+}
+
+model ResearchQuery {
+  id                String    @id @default(cuid())
+  researchProjectId String
+  organizationId    String
+  query             String    @db.Text
+  executedAt        DateTime?
+  resultCount       Int       @default(0)
+  createdAt         DateTime  @default(now())
+
+  project      ResearchProject @relation(fields: [researchProjectId], references: [id], onDelete: Cascade)
+  organization Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([researchProjectId])
+  @@map("research_queries")
+}
+
+/// Part 9, 37. `conflictsWithFindingId` implements cross-source conflict
+/// detection at the finding level (distinct from the org-knowledge-level
+/// `KnowledgeConflict` — a research project can find two sources disagreeing
+/// before either ever becomes a stored `KnowledgeItem`).
+model ResearchFinding {
+  id                     String   @id @default(cuid())
+  researchProjectId      String
+  organizationId         String
+  finding                String   @db.Text
+  sourceId               String?
+  confidence             Float    @default(0.5)
+  conflictsWithFindingId String?
+  createdAt              DateTime @default(now())
+
+  project              ResearchProject    @relation(fields: [researchProjectId], references: [id], onDelete: Cascade)
+  organization         Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  source               KnowledgeSource?   @relation(fields: [sourceId], references: [id], onDelete: SetNull)
+  conflictsWithFinding ResearchFinding?   @relation("FindingConflict", fields: [conflictsWithFindingId], references: [id], onDelete: SetNull)
+  conflictedBy         ResearchFinding[]  @relation("FindingConflict")
+  citations            ResearchCitation[]
+
+  @@index([researchProjectId])
+  @@map("research_findings")
+}
+
+/// Part 12. Never fabricated — always points at a real, retrieved
+/// `KnowledgeSource`; a finding with no verifiable source has no citation row
+/// at all rather than an invented one.
+model ResearchCitation {
+  id                String   @id @default(cuid())
+  researchProjectId String
+  findingId         String?
+  organizationId    String
+  sourceId          String
+  quote             String?  @db.Text
+  url               String
+  retrievedAt       DateTime
+  createdAt         DateTime @default(now())
+
+  project      ResearchProject  @relation(fields: [researchProjectId], references: [id], onDelete: Cascade)
+  finding      ResearchFinding? @relation(fields: [findingId], references: [id], onDelete: SetNull)
+  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  source       KnowledgeSource  @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  @@index([researchProjectId])
+  @@map("research_citations")
 }

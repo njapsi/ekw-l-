@@ -1,7 +1,7 @@
 'use server';
 
 import { revalidatePath } from 'next/cache';
-import { isAppError, missions, security } from '@growth-agent/services';
+import { agent, isAppError, missions, security } from '@growth-agent/services';
 import { requirePermission } from '@/lib/auth';
 
 export interface ActionResult {
@@ -64,7 +64,18 @@ export async function planMissionAction(missionId: string): Promise<ActionResult
     const { user, org } = await requirePermission('mission.manage');
     const rl = await limited(`mission-plan:${org.id}:${user.id}`, 20, 3600);
     if (rl) return rl;
-    const mission = await missions.planMission({ organizationId: org.id, userId: user.id, missionId });
+    // Phase 11: knowledge-aware, model-refined planning when a provider is
+    // configured — reuses the same env resolution the chat agent uses
+    // (`growthAgentDepsFromEnv`), so planning degrades to fully
+    // deterministic exactly as it always has when no provider is set.
+    const deps = agent.growthAgentDepsFromEnv({ organizationId: org.id, actorId: user.id });
+    const mission = await missions.planMission({
+      organizationId: org.id,
+      userId: user.id,
+      missionId,
+      model: deps.model,
+      embeddingModel: deps.embeddingModel,
+    });
     refresh(missionId);
     return {
       ok: true,

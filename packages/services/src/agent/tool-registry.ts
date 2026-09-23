@@ -26,6 +26,10 @@ import type { ToolDefinition } from '@growth-agent/ai';
 import { listEnabledMcpTools } from '../mcp/registry.js';
 import type { RESEARCH_TOOL_NAMES } from '../research/tools.js';
 import { RESEARCH_TOOLS } from '../research/tools.js';
+import type { RESEARCH_PROJECT_TOOL_NAMES } from '../research/project-tools.js';
+import { RESEARCH_PROJECT_TOOLS } from '../research/project-tools.js';
+import type { KNOWLEDGE_TOOL_NAMES } from '../knowledge/tools.js';
+import { KNOWLEDGE_TOOLS } from '../knowledge/tools.js';
 import {
   INTEGRATION_TOOLS,
   type IntegrationToolContext,
@@ -112,6 +116,127 @@ const RESEARCH_METADATA: Record<
     organizationScoped: true,
   },
   'research.search': {
+    category: 'READ',
+    integration: null,
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTERNAL',
+    organizationScoped: true,
+  },
+};
+
+/** Category/risk metadata for the `ResearchProject` tools (Phase 11). Every
+ * one is READ or a bounded GENERATION (creating a project only enqueues
+ * work, it never fetches anything itself outside the engine's own SSRF-safe,
+ * usage-metered path) — no ACTION-category tool here, matching `research.*`'s
+ * existing all-LOW-risk precedent. */
+const RESEARCH_PROJECT_METADATA: Record<
+  (typeof RESEARCH_PROJECT_TOOL_NAMES)[number],
+  Omit<AgentToolMetadata, 'name' | 'description'>
+> = {
+  'research.project.create': {
+    category: 'GENERATION',
+    integration: null,
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTERNAL',
+    organizationScoped: true,
+  },
+  'research.project.get': {
+    category: 'READ',
+    integration: null,
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTERNAL',
+    organizationScoped: true,
+  },
+  'research.project.list': {
+    category: 'READ',
+    integration: null,
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTERNAL',
+    organizationScoped: true,
+  },
+};
+
+/** Category/risk metadata for the Knowledge/Memory/Evidence tools (Phase
+ * 11). Every one operates on the org's own stored knowledge, never an
+ * external system — LOW risk throughout, no approval gate, matching the
+ * native read tools' precedent. `knowledge.create`/`update`/`archive` are
+ * GENERATION/ACTION but still LOW risk: the worst case is a wrong (or
+ * later-corrected) knowledge item, not an external side effect, and every
+ * write already goes through the same validation + audit log a human editing
+ * the Knowledge Center UI would. */
+const KNOWLEDGE_METADATA: Record<
+  (typeof KNOWLEDGE_TOOL_NAMES)[number],
+  Omit<AgentToolMetadata, 'name' | 'description'>
+> = {
+  'knowledge.search': {
+    category: 'READ',
+    integration: null,
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTERNAL',
+    organizationScoped: true,
+  },
+  'knowledge.get': {
+    category: 'READ',
+    integration: null,
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTERNAL',
+    organizationScoped: true,
+  },
+  'knowledge.create': {
+    category: 'GENERATION',
+    integration: null,
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTERNAL',
+    organizationScoped: true,
+  },
+  'knowledge.update': {
+    category: 'ACTION',
+    integration: null,
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTERNAL',
+    organizationScoped: true,
+  },
+  'knowledge.archive': {
+    category: 'ACTION',
+    integration: null,
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTERNAL',
+    organizationScoped: true,
+  },
+  'memory.propose': {
+    category: 'GENERATION',
+    integration: null,
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTERNAL',
+    organizationScoped: true,
+  },
+  'memory.search': {
+    category: 'READ',
+    integration: null,
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTERNAL',
+    organizationScoped: true,
+  },
+  'evidence.search': {
+    category: 'READ',
+    integration: null,
+    riskLevel: 'LOW',
+    requiresApproval: false,
+    providerType: 'INTERNAL',
+    organizationScoped: true,
+  },
+  'evidence.get': {
     category: 'READ',
     integration: null,
     riskLevel: 'LOW',
@@ -414,7 +539,25 @@ export function listToolMetadata(): AgentToolMetadata[] {
     description: tool.description,
     ...WORDPRESS_METADATA[tool.name],
   }));
-  return [...native, ...research, ...youtube, ...tiktok, ...wordpress];
+  const researchProjects = Object.values(RESEARCH_PROJECT_TOOLS).map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    ...RESEARCH_PROJECT_METADATA[tool.name],
+  }));
+  const knowledge = Object.values(KNOWLEDGE_TOOLS).map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    ...KNOWLEDGE_METADATA[tool.name],
+  }));
+  return [
+    ...native,
+    ...research,
+    ...youtube,
+    ...tiktok,
+    ...wordpress,
+    ...researchProjects,
+    ...knowledge,
+  ];
 }
 
 /**

@@ -35,9 +35,11 @@ import {
 } from './integration-tools.js';
 import type { ToolPolicyOutcome } from './policy-engine.js';
 import { RESEARCH_TOOL_NAMES, runResearchTool } from '../research/tools.js';
+import { RESEARCH_PROJECT_TOOL_NAMES, runResearchProjectTool } from '../research/project-tools.js';
 import { YOUTUBE_TOOL_NAMES, runYouTubeTool } from './youtube-tools.js';
 import { TIKTOK_TOOL_NAMES, runTikTokTool } from './tiktok-tools.js';
 import { WORDPRESS_TOOL_NAMES, runWordPressTool } from './wordpress-tools.js';
+import { KNOWLEDGE_TOOL_NAMES, runKnowledgeTool } from '../knowledge/tools.js';
 import { executeMcpTool } from '../mcp/execute.js';
 import { blockedFromPolicy, failed, success, type ToolResultEnvelope } from './tool-envelope.js';
 
@@ -51,18 +53,31 @@ export interface ToolExecutionContext {
 
 const NATIVE_NAMES = new Set<string>(INTEGRATION_TOOL_NAMES);
 const RESEARCH_NAMES = new Set<string>(RESEARCH_TOOL_NAMES);
+const RESEARCH_PROJECT_NAMES = new Set<string>(RESEARCH_PROJECT_TOOL_NAMES);
 const YOUTUBE_NAMES = new Set<string>(YOUTUBE_TOOL_NAMES);
 const TIKTOK_NAMES = new Set<string>(TIKTOK_TOOL_NAMES);
 const WORDPRESS_NAMES = new Set<string>(WORDPRESS_TOOL_NAMES);
+const KNOWLEDGE_NAMES = new Set<string>(KNOWLEDGE_TOOL_NAMES);
 
 function kindOf(
   name: string,
-): 'native' | 'research' | 'youtube' | 'tiktok' | 'wordpress' | 'mcp' | 'unknown' {
+):
+  | 'native'
+  | 'research'
+  | 'researchProject'
+  | 'youtube'
+  | 'tiktok'
+  | 'wordpress'
+  | 'knowledge'
+  | 'mcp'
+  | 'unknown' {
   if (NATIVE_NAMES.has(name)) return 'native';
   if (RESEARCH_NAMES.has(name)) return 'research';
+  if (RESEARCH_PROJECT_NAMES.has(name)) return 'researchProject';
   if (YOUTUBE_NAMES.has(name)) return 'youtube';
   if (TIKTOK_NAMES.has(name)) return 'tiktok';
   if (WORDPRESS_NAMES.has(name)) return 'wordpress';
+  if (KNOWLEDGE_NAMES.has(name)) return 'knowledge';
   if (name.startsWith('mcp.')) return 'mcp';
   return 'unknown';
 }
@@ -234,6 +249,20 @@ export async function executeAgentTool(
         db,
       };
       data = await runWordPressTool(toolName, wordpressCtx, rawInput);
+    } else if (kind === 'researchProject') {
+      const researchCtx: IntegrationToolContext = {
+        organizationId: ctx.organizationId,
+        userId: ctx.userId,
+        db,
+      };
+      data = await runResearchProjectTool(toolName, researchCtx, rawInput);
+    } else if (kind === 'knowledge') {
+      const knowledgeCtx: IntegrationToolContext = {
+        organizationId: ctx.organizationId,
+        userId: ctx.userId,
+        db,
+      };
+      data = await runKnowledgeTool(toolName, knowledgeCtx, rawInput);
     } else {
       envelope = await executeMcpTool(
         ctx.organizationId,

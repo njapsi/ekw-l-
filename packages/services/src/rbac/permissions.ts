@@ -61,6 +61,12 @@ export const PERMISSIONS = [
   'api_key.revoke',
   'mission.view',
   'mission.manage',
+  'knowledge.view',
+  'knowledge.manage',
+  'memory.view',
+  'memory.manage',
+  'research.view',
+  'research.run',
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
@@ -81,6 +87,9 @@ const VIEWER: Permission[] = [
   'report.view',
   'settings.view',
   'mission.view',
+  'knowledge.view',
+  'memory.view',
+  'research.view',
 ];
 
 /**
@@ -99,6 +108,9 @@ const MEMBER: Permission[] = [
   'automation.create',
   'automation.update',
   'mission.manage',
+  'knowledge.manage',
+  'memory.manage',
+  'research.run',
 ];
 
 const MANAGER: Permission[] = [

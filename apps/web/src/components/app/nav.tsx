@@ -1,11 +1,13 @@
 import type { ComponentType } from 'react';
 import {
+  BookOpen,
   Bot,
   CheckSquare,
   Clock,
   CreditCard,
   DollarSign,
   FileText,
+  FlaskConical,
   Gauge,
   History,
   LayoutDashboard,
@@ -68,6 +70,8 @@ export const APP_NAV_GROUPS: NavGroup[] = [
     label: 'Workspace',
     items: [
       { href: '/app/missions', label: 'Missions', icon: Target },
+      { href: '/app/knowledge', label: 'Knowledge', icon: BookOpen },
+      { href: '/app/research', label: 'Research', icon: FlaskConical },
       { href: '/app/integrations', label: 'Connections', icon: Plug },
       { href: '/app/settings/members', label: 'Team', icon: Users },
       { href: '/app/settings/audit', label: 'Activity', icon: History },
